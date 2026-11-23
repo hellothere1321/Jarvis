@@ -4,6 +4,8 @@
 // transcribes on this PC with NVIDIA Parakeet TDT 0.6B v3 (int8 ONNX via parakeet-rs). Parakeet isn't a
 // streaming model, so live text comes from re-reading the take about once a second.
 // Hold the chord = push-to-talk (release sends). Quick tap = hands-free (ends on a pause or another tap).
+// On Windows, Right Ctrl and the Copilot key also talk while held, and a double tap of either opens the typing field
+// (talkkeys.rs).
 // While the chord is held, moving the cursor round something circles it (ink.rs); the circled area goes out with
 // what was said, as on macOS (Windows only). On Wayland no app can watch the keyboard, so there {"cmd":"toggle"}
 // (sent for `roamies --talk`, which people bind to a key) starts a take, and sends it when it comes again or on a
@@ -30,6 +32,8 @@ mod ink;
 mod keys;
 mod meeting;
 mod onnx;
+#[cfg(windows)]
+mod talkkeys;
 mod wake;
 
 use audio::{MicError, Sink, Source};
@@ -290,6 +294,13 @@ struct Voice {
     dictation_result: Option<Receiver<String>>,
     #[cfg(windows)]
     dictated_text: Option<String>,
+    // Right Ctrl and the Copilot key (talkkeys.rs): hold to talk, double-tap to type.
+    #[cfg(windows)]
+    talk_keys: Option<talkkeys::Keyboard>,
+    #[cfg(windows)]
+    taps: talkkeys::Taps,
+    /// This push-to-talk take is held by one of those keys, not the chord: its release (not the chord's) sends.
+    key_talk: bool,
     // Wake word: on in settings; held off while Roamies answers and speaks; resting just after a take.
     wake_on: bool,
     wake_hold: bool,
@@ -352,6 +363,11 @@ impl Voice {
             dictation_result: None,
             #[cfg(windows)]
             dictated_text: None,
+            #[cfg(windows)]
+            talk_keys: None,
+            #[cfg(windows)]
+            taps: talkkeys::Taps::default(),
+            key_talk: false,
             wake_on: false,
             wake_hold: false,
             wake: wake::WakeWord::default(),
@@ -390,6 +406,8 @@ impl Voice {
         let now = self.now();
         #[cfg(windows)]
         self.tick_dictation(now);
+        #[cfg(windows)]
+        self.tick_talk_keys(now);
         self.tick_keys(now, keys::held());
         self.ink.set_armed(matches!(self.phase, Phase::Armed | Phase::Holding), now);
         self.ink.follow(now);
@@ -458,7 +476,7 @@ impl Voice {
                 }
             }
             Phase::Holding => {
-                if released {
+                if released && !self.key_talk {
                     self.end("released", now);
                     self.finish();
                 } else if now - self.listen_at > MAX_SESSION {
@@ -470,6 +488,7 @@ impl Voice {
                 // Pressing again switches to push-to-talk; letting go then sends.
                 if chord && !prev && !self.blocked {
                     self.phase = Phase::Holding;
+                    self.key_talk = false;
                     self.released_at = None;
                     return;
                 }
@@ -505,6 +524,59 @@ impl Voice {
             }
             self.dictation_keys = None;
             self.dictation_hold = dictation::Hold::Up;
+        }
+    }
+
+    #[cfg(windows)]
+    fn watch_talk_keys(&mut self) {
+        if self.talk_keys.is_none() {
+            self.talk_keys = talkkeys::Keyboard::watch();
+        }
+    }
+
+    /// Presses that came in while voice input was off (meeting-only) are dropped, not acted on later.
+    #[cfg(windows)]
+    fn drop_talk_keys(&mut self) {
+        while self.talk_keys.as_ref().and_then(talkkeys::Keyboard::next).is_some() {}
+        self.taps = talkkeys::Taps::default();
+    }
+
+    #[cfg(windows)]
+    fn tick_talk_keys(&mut self, now: f64) {
+        while let Some(key) = self.talk_keys.as_ref().and_then(talkkeys::Keyboard::next) {
+            let action = self.taps.key(key, now);
+            self.on_talk_key(action, now);
+        }
+        let available = matches!(self.phase, Phase::Idle | Phase::Wake);
+        let action = self.taps.tick(now, available);
+        self.on_talk_key(action, now);
+    }
+
+    #[cfg(windows)]
+    fn on_talk_key(&mut self, action: talkkeys::Action, now: f64) {
+        match action {
+            talkkeys::Action::None => {}
+            talkkeys::Action::Talk => {
+                if self.phase == Phase::Wake {
+                    self.stop_wake();
+                }
+                self.arm(now);
+                self.key_talk = true;
+                self.phase = Phase::Holding;
+                self.show_listening("hold", now);
+            }
+            talkkeys::Action::Send if self.key_talk && self.phase == Phase::Holding => {
+                self.key_talk = false;
+                self.end("released", now);
+                self.finish();
+            }
+            talkkeys::Action::Cancel if self.key_talk && self.phase == Phase::Holding => {
+                self.key_talk = false;
+                log("not a talk: the key was part of a shortcut");
+                self.cancel();
+            }
+            talkkeys::Action::Send | talkkeys::Action::Cancel => {}
+            talkkeys::Action::Write => emit(json!({ "type": "write_tap" })),
         }
     }
 
@@ -607,6 +679,7 @@ impl Voice {
 
     fn arm(&mut self, now: f64) {
         self.phase = Phase::Armed;
+        self.key_talk = false;
         self.nothing_wait = 8.0;
         self.chord_at = now;
         self.best.clear();
@@ -1202,6 +1275,10 @@ fn main() {
     if arg(&args, "--dictate").as_deref() == Some("rshift") {
         voice.set_dictation(true);
     }
+    #[cfg(windows)]
+    if voice.test_audio.is_none() {
+        voice.watch_talk_keys();
+    }
 
     let stdin_tx = tx.clone();
     thread::spawn(move || {
@@ -1239,6 +1316,7 @@ fn main() {
         }
         #[cfg(windows)]
         if !input {
+            voice.drop_talk_keys();
             continue;
         }
         voice.tick();

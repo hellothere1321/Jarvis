@@ -406,6 +406,13 @@ fn handle_voice(app: &AppHandle, msg: Value) {
     if msg.get("type").and_then(Value::as_str) == Some("dictate") {
         return;
     }
+    // A double tap of Right Ctrl or the Copilot key: the same as the type-to-ask tap (not during setup).
+    if msg.get("type").and_then(Value::as_str) == Some("write_tap") {
+        if !ONBOARDING.load(Ordering::Relaxed) {
+            to_sidecar(app, &msg);
+        }
+        return;
+    }
     let mut ui = msg.clone();
     ui["kind"] = json!("voice");
     if msg.get("type").and_then(Value::as_str) == Some("buddy") {
