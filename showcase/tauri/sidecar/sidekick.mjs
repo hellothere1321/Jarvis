@@ -1967,7 +1967,11 @@ function setLogin(on) { login.asked = true; send({ type: 'login_item', on }); }
 // The app checks the signed feed and installs (Rust: update()); this side decides what to say and offers the menu item.
 // page: this copy can't replace itself (Linux, installed from a .deb or .rpm), so "install" opens the download page.
 const update = { available: null, told: null, manual: false, installing: false, checking: false, result: null, page: false, done: null };
+// This fork has no signed update feed of its own yet (tauri.conf.json lists no endpoints), so nothing is checked:
+// a new version comes from a fresh install.
+const UPDATES_OFF = true;
 function checkUpdates(manual = false) {
+  if (UPDATES_OFF) { if (manual) say(`Updates are off in this build (${VERSION}): a new version comes from a fresh install.`, 'happy'); return; }
   update.manual = manual;
   if (manual) { update.checking = true; update.result = null; panel(); }
   send({ type: 'update', install: false });

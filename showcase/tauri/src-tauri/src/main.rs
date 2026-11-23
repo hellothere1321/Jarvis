@@ -796,7 +796,7 @@ fn show_panel(app: &AppHandle, rect: Option<tauri::Rect>, toggle: bool) {
         Some(w) => w,
         None => {
             let b = WebviewWindowBuilder::new(app, PANEL_LABEL, WebviewUrl::App("panel/index.html".into()))
-                .title("Roamies")
+                .title("Jarvis")
                 .inner_size(PANEL_W, PANEL_H)
                 .resizable(false)
                 .maximizable(false)
@@ -1159,7 +1159,7 @@ fn build_overlays(app: &AppHandle) -> tauri::Result<()> {
         #[cfg(not(target_os = "linux"))]
         let unmanaged = false;
         let b = WebviewWindowBuilder::new(app, label, WebviewUrl::App("desktop.html".into()))
-            .title("Roamies")
+            .title("Jarvis")
             .visible(!unmanaged)
             .transparent(true)
             .decorations(false)
@@ -1710,11 +1710,11 @@ fn login_item(app: &AppHandle, set: Option<bool>) {
             (false, false, false)
         } else {
             match set {
-                Some(true) => { let v = format!("\"{}\"", exe.display()); reg(&["add", KEY, "/v", "Roamies", "/t", "REG_SZ", "/d", &v, "/f"]); }
-                Some(false) => { reg(&["delete", KEY, "/v", "Roamies", "/f"]); }
+                Some(true) => { let v = format!("\"{}\"", exe.display()); reg(&["add", KEY, "/v", "Jarvis", "/t", "REG_SZ", "/d", &v, "/f"]); }
+                Some(false) => { reg(&["delete", KEY, "/v", "Jarvis", "/f"]); }
                 None => {}
             }
-            (true, reg(&["query", KEY, "/v", "Roamies"]), false)
+            (true, reg(&["query", KEY, "/v", "Jarvis"]), false)
         }
     };
     #[cfg(target_os = "linux")]
@@ -1963,7 +1963,7 @@ fn main() {
             let menu = Menu::with_items(app, &[&starting, &quit])?;
             // Left click opens the panel; right click shows the short menu.
             let mut tray = TrayIconBuilder::with_id("roamies")
-                .tooltip("Roamies")
+                .tooltip("Jarvis")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_tray_icon_event(|tray, e| {
