@@ -2137,9 +2137,16 @@
     let yy = 26 + 8;
     const head = (label, n, gap) => { if (gap) yy += 8; rows.push({ head: label, n, gap, y: yy, h: 26 }); yy += 26; };
     const item = (i) => { const lines = wrapRows(i.text, tw, BODY, 3), h = lines.length * 19 + 10; rows.push({ i, lines, when: remWhen(i), y: yy, h }); yy += h; };
-    head('Today', today.filter((i) => !i.done).length);
-    if (today.length) today.forEach(item); else { rows.push({ note: later.length ? 'Nothing due today' : 'Nothing on your list yet', y: yy, h: 26 }); yy += 26; }
-    if (later.length) { head('Later', later.length, true); later.forEach(item); }
+    const timers = all.filter((i) => i.kind === 'timer');
+    const todayItems = today.filter((i) => i.kind !== 'timer');
+    const laterItems = later.filter((i) => i.kind !== 'timer');
+    if (timers.length) { head('Timers', timers.length); timers.forEach(item); }
+    if (todayItems.length || !timers.length) {
+      head('Today', todayItems.filter((i) => !i.done).length, timers.length > 0);
+      if (todayItems.length) todayItems.forEach(item);
+      else { rows.push({ note: laterItems.length ? 'Nothing due today' : 'Nothing on your list yet', y: yy, h: 26 }); yy += 26; }
+    }
+    if (laterItems.length) { head('Later', laterItems.length, true); laterItems.forEach(item); }
     const max = maxCardH();
     let hidden = 0;
     if (yy + 10 > max) {
@@ -2166,7 +2173,7 @@
     b.fillStyle = 'rgba(120,255,226,0.06)'; b.fillRect(x + 2, y + 2, w - 4, 24);
     b.fillStyle = DEEP; b.fillRect(x + 2, y + 26, w - 4, 1);
     [0, 1].forEach((k) => { b.fillStyle = k ? DEEP : ACC; b.fillRect(x + 12 + k * 12, y + 11, 5, 5); });
-    typed(b, 'reminders', x + w / 2, y + 17, `500 10px ${MONO}`, DIM, (t - this.opened) / 0.4, { anchor: 'middle' });
+    typed(b, 'your list', x + w / 2, y + 17, `500 10px ${MONO}`, DIM, (t - this.opened) / 0.4, { anchor: 'middle' });
     pinIcon(b, x + w - 44, y + 13, this);
     const cx = x + w - 18, cyy = y + 13;
     b.fillStyle = this.hoverClose ? HOT : DIM; for (let k = -3; k <= 3; k++) { b.fillRect(cx + k - 1, cyy + k - 1, 2, 2); b.fillRect(cx + k - 1, cyy - k - 1, 2, 2); }

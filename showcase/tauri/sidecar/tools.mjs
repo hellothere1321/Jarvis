@@ -15,6 +15,7 @@ import { plain } from './intro.mjs';
 import { linuxSession, mayBeGame, seesPointer } from './platform.mjs';
 import { openTarget, siteAddress } from './browser.mjs';
 import { addCommitment, forgetFact, getCommitment, parseDue, parseRepeat, repeatLabel, updateCommitment } from './store.mjs';
+import { timerName } from './quick.mjs';
 import * as planner from './planner.mjs';
 import * as timelog from './timelog.mjs';
 import * as inbox from './inbox.mjs';
@@ -1160,6 +1161,16 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       },
     },
     ...(browser ? browserTools() : []),
+    {
+      name: 'set_timer',
+      description: 'Start a one-off countdown that rings after a duration. Use the user’s intent and conversation context, including voice false starts and corrections. For example, “give the pasta six more minutes” can mean a countdown. Ask if the duration or intent is unclear. Use remember_commitment when they want a nudge to do something later.',
+      parameters: z.object({ seconds: z.number().int().min(1).max(86400), label: z.string().trim().min(1).max(200).optional() }),
+      execute: async ({ seconds, label }) => {
+        const c = await addCommitment(label ?? timerName(seconds), Date.now() + seconds * 1000, 'timer');
+        onCommitments(c);
+        return `Started ${c.text} for ${seconds} seconds. Timer ID ${c.id}.`;
+      },
+    },
     {
       name: 'remember_commitment',
       description: `Save what ${userName} commits to doing or asks to be reminded about (never small talk or what you'll do yourself). Saving shows their reminders list on screen by itself, so don't also draw one. kind: 'reminder' only for a plain "remind me to X at/in …" (clears once nudged); 'commitment' (default) for anything they say they'll do ("I'll finish the slides by Friday", "hold me to it"), open until they say it's done. due: "in 90s", "in 5m", "in 1h30m", "in 2 days", or local YYYY-MM-DDTHH:mm[:ss] or YYYY-MM-DD; none if no time. Resolve "Thursday", "at 2" or "tonight" from their message's timestamp. repeat, only when asked again and again: daily, weekdays, weekends, weekly, monthly, yearly, "every N minutes|hours|days|weeks|months" (5 minutes at least) or days like "mon,wed,fri", with due as the first time. A repeating reminder moves on as it fires, a repeating commitment (a habit, like the gym) when marked done. One saved item covers the whole series: never save one per day.`,

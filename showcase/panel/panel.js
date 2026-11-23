@@ -1329,14 +1329,17 @@
   const plEmpty = (text) => el('p', { className: 'empty', textContent: text });
   function plToday(p) {
     const t = p.today, now = p.now;
-    if (![t.overdue, t.tasks, t.events, t.reminders].some((x) => x.length)) return [plEmpty('Nothing planned for today. Add something above.')];
+    if (![t.overdue, t.tasks, t.events, t.timers, t.reminders].some((x) => x.length)) return [plEmpty('Nothing planned for today. Add something above.')];
     return [
       t.overdue.length ? group('Overdue', null, t.overdue.length, plList(t.overdue, { date: true, now }, 'Overdue')) : null,
       t.tasks.length ? group('Tasks', null, t.tasks.length, plList(t.tasks, { now }, 'Tasks today')) : null,
       t.events.length ? group('Events', null, t.events.length, plList(t.events, { now }, 'Events today')) : null,
+      t.timers.length ? group('Timers', null, t.timers.length, el('ul', { className: 'list', 'aria-label': 'Active timers' }, t.timers.map((c) => el('li', { className: 'item mem' },
+        el('span', { className: 'text', dir: 'auto', title: c.text }, c.text,
+          el('small', { textContent: `Ends ${sameDay(now, c.due) ? '' : `${plDay(c.due)}, `}${plTime(c.due)}` })))))) : null,
       t.reminders.length ? group('Reminders', 'Ask me to change these.', t.reminders.length, el('ul', { className: 'list', 'aria-label': 'Reminders today' }, t.reminders.map((c) => el('li', { className: 'item mem' },
         el('span', { className: 'text', dir: 'auto', title: c.text }, c.text,
-          el('small', { className: c.overdue ? 'late' : '', textContent: c.timer ? `ends ${plTime(c.due)}` : c.overdue ? `Was due ${plDay(c.due)}, ${plTime(c.due)}` : plTime(c.due) })))))) : null,
+          el('small', { className: c.overdue ? 'late' : '', textContent: c.overdue ? `Was due ${plDay(c.due)}, ${plTime(c.due)}` : plTime(c.due) })))))) : null,
     ];
   }
   function plUpcoming(p) {

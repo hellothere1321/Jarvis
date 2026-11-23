@@ -97,17 +97,17 @@ export function plannerView(now = Date.now(), { week = 0, reminders = [], feeds 
     const lists = [...groups.values()].sort((a, b) => (a.name === '') - (b.name === '') || a.name.localeCompare(b.name));
     const weekFirst = weekStart(now, week);
     const overdue = todays.filter((r) => r.overdue);
-    // A timer ends at `due` instead of being due like a reminder; once fired it's done and never shows, even if a
-    // stale state still carries it. The page draws its time as an end time (see panel.js).
-    const doneTimer = (c) => c.kind === 'timer' && (c.done || c.doneAt || ['done', 'dropped'].includes(c.status));
-    const shown = reminders.filter((c) => c.due != null && c.due < tomorrow && !doneTimer(c));
+    const scheduled = reminders.filter((c) => c.due != null).sort((a, b) => a.due - b.due);
+    const timers = scheduled.filter((c) => c.kind === 'timer' && c.due > now
+      && !c.done && !c.doneAt && c.status !== 'done' && c.status !== 'dropped');
+    const shown = scheduled.filter((c) => c.kind !== 'timer' && c.due < tomorrow);
     return {
       now, error: null,
       today: {
         overdue, tasks: todays.filter((r) => r.kind === 'task' && !r.overdue).sort(dayOrder),
         events: todays.filter((r) => r.kind === 'event').sort(dayOrder),
-        reminders: shown.sort((a, b) => a.due - b.due)
-          .map((c) => ({ id: c.id, text: c.text, due: c.due, ...(c.kind === 'timer' ? { timer: true } : {}), overdue: c.kind === 'timer' ? false : c.due < today })),
+        timers: timers.map(({ id, text, due }) => ({ id, text, due })),
+        reminders: shown.map(({ id, text, due }) => ({ id, text, due, overdue: due < today })),
       },
       overdue: overdue.length,
       upcoming, lists,

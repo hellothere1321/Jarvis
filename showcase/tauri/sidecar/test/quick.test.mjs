@@ -225,4 +225,25 @@ const deps = (over = {}) => {
   assert.ok(fs.readFileSync(path.join(S.DIR, 'memory.json'), 'utf8').includes('call mum'), 'saved to the scratch folder');
 }
 
+// An imperfect transcript can reach the model. Its countdown tool still saves and fires a real timer.
+{
+  const text = 'Set a five set of five minute timer.';
+  assert.equal(m(text), null);
+  const { createTools } = await import('../tools.mjs');
+  const { LITE_TOOLS } = await import('../lite.mjs');
+  const changed = [];
+  const { tools } = createTools({ onCommitments: (c) => changed.push(c) });
+  const timer = tools.find((t) => t.name === 'set_timer');
+  assert.ok(LITE_TOOLS.has(timer.name));
+  assert.equal(timer.parameters.safeParse({ seconds: 0 }).success, false);
+  const before = Date.now();
+  assert.match(await timer.execute(timer.parameters.parse({ seconds: 300 })), /5 minute timer/);
+  const [c] = changed;
+  assert.equal(c.kind, 'timer');
+  assert.ok(c.due >= before + 300_000 && c.due <= Date.now() + 300_000);
+  assert.equal(S.openCommitments().find((x) => x.id === c.id)?.kind, 'timer');
+  assert.deepEqual((await S.takeDueReminders(c.due)).map((x) => x.id), [c.id]);
+  assert.equal(S.getCommitment(c.id).status, 'done');
+}
+
 console.log('quick commands tests: passed');

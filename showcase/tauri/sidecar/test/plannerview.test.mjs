@@ -19,7 +19,7 @@ const now = at(11, 4, 10); // a Wednesday
 await reset();
 let view = V.plannerView(now);
 assert.equal(view.error, null);
-assert.deepEqual([view.today.overdue, view.today.tasks, view.today.events, view.today.reminders, view.upcoming, view.lists], [[], [], [], [], [], []]);
+assert.deepEqual([view.today.overdue, view.today.tasks, view.today.events, view.today.timers, view.today.reminders, view.upcoming, view.lists], [[], [], [], [], [], [], []]);
 assert.equal(view.week.days.length, 7);
 assert.equal(view.overdue, 0);
 
@@ -51,17 +51,20 @@ assert.deepEqual(ids(view.today.events), ['Holiday', 'Morning', 'Afternoon']);
 assert.deepEqual(view.today.reminders.map((r) => [r.id, r.overdue]), [['r2', true], ['r1', false]]);
 assert.deepEqual(Object.keys(view.today.reminders[0]).sort(), ['due', 'id', 'overdue', 'text']);
 
-// Timers show as timers (the page adds "ends" to their time), never as overdue reminders; fired ones are gone.
+// Only active timers show in the timers section, including countdowns that end tomorrow.
 const timerView = V.plannerView(now, { reminders: [
   { id: 't1', kind: 'timer', text: '10 minute timer', due: at(11, 4, 12, 58) },
   { id: 't2', kind: 'timer', text: 'Fired timer', due: at(11, 4, 13, 30), status: 'done' },
   { id: 't3', kind: 'timer', text: 'Done timer', due: at(11, 4, 13, 45), done: true },
   { id: 't4', kind: 'timer', text: 'Old timer', due: at(11, 3, 9) },
+  { id: 't5', kind: 'timer', text: 'Tomorrow timer', due: at(11, 5, 1) },
   { id: 'r5', text: 'Call back', due: at(11, 4, 14) },
 ] });
-assert.deepEqual(timerView.today.reminders.map((r) => [r.id, r.timer ?? false, r.overdue]), [['t4', true, false], ['t1', true, false], ['r5', false, false]]);
-assert.equal(timerView.today.reminders[1].text, '10 minute timer');
-assert.equal(timerView.today.reminders[1].due, at(11, 4, 12, 58));
+assert.deepEqual(timerView.today.reminders.map((r) => r.id), ['r5']);
+assert.deepEqual(timerView.today.timers, [
+  { id: 't1', text: '10 minute timer', due: at(11, 4, 12, 58) },
+  { id: 't5', text: 'Tomorrow timer', due: at(11, 5, 1) },
+]);
 
 // The same item as the page draws it, with the form's fields as the form shows them.
 const afternoon = view.today.events.find((r) => r.title === 'Afternoon');

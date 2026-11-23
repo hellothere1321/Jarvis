@@ -250,6 +250,9 @@ function parseWhen(text, now) {
 }
 
 // ---------- timers and reminders ----------
+// Countdown names put the duration before "timer", with singular units.
+export const timerName = (secs) => `${spanLabel(secs).replace(/\b(\d+) (second|minute|hour)s\b/g, '$1 $2')} timer`;
+
 function timerMatch(s) {
   const m = /^(?:(?:set|start|make|create)\s+)?(?:an? |the )?(?:timer|countdown)(?: for| of)?\s+(.+)$/i.exec(s)
     ?? /^(?:(?:set|start|make|create)\s+)?(?:an? )?(.+?)[ -](?:timer|countdown)$/i.exec(s);
@@ -258,9 +261,7 @@ function timerMatch(s) {
   const secs = parseSpan(m[1].replace(/^(\d+(?:\.\d+)?|\w+)[ -](second|minute|hour)$/i, '$1 $2'));
   if (!secs) return null;
   const label = spanLabel(secs);
-  // Listed as "10 minute timer": the unit singular before "timer".
-  const name = `${label.replace(/\b(\d+) (second|minute|hour)s\b/g, '$1 $2')} timer`;
-  return { kind: 'timer', args: { secs, text: name }, reply: `Timer set for ${label}.` };
+  return { kind: 'timer', args: { secs, text: timerName(secs) }, reply: `Timer set for ${label}.` };
 }
 
 const VAGUE = /^(?:it|that|this|something|stuff|things?|about\b.*|of\b.*|the (?:thing|stuff)\b.*|what i (?:said|told you)\b.*)$/i;
