@@ -45,6 +45,15 @@ mod imp {
     const VK_LWIN: i32 = 0x5B;
     const VK_RWIN: i32 = 0x5C;
 
+    pub fn right_shift_down() -> bool {
+        down(0xA1)
+    }
+
+    pub fn right_shift_is_alone() -> bool {
+        let f = held();
+        f.mods & !SHIFT == 0 && !f.altgr && !down(0xA0) && !other_key_down()
+    }
+
     pub fn held() -> Held {
         let mut mods = 0;
         if down(VK_CONTROL) {

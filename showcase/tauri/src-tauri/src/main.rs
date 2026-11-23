@@ -1823,9 +1823,19 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
             if let Some(mods) = msg.get("talk").and_then(Value::as_array) {
                 let mods: Vec<String> = mods.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect();
                 if mods.len() == 2 {
-                    *app.state::<TalkChord>().0.lock().unwrap() = mods.clone();
-                    to_voice(app, &json!({ "cmd": "chord", "mods": mods }));
+                    let chord = app.state::<TalkChord>();
+                    let mut current = chord.0.lock().unwrap();
+                    if !cfg!(windows) || *current != mods {
+                        *current = mods.clone();
+                        to_voice(app, &json!({ "cmd": "chord", "mods": mods }));
+                    }
                 }
+            }
+            #[cfg(windows)]
+            match msg.get("dictate") {
+                Some(Value::Null) => voice::set_dictation(app, false),
+                Some(Value::String(key)) if key == "rshift" => voice::set_dictation(app, true),
+                _ => {}
             }
             // The type-to-ask pair; none sent (Wayland) switches the tap off.
             let write = msg.get("write").and_then(Value::as_array).and_then(|m| {

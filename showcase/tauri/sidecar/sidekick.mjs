@@ -54,7 +54,7 @@ import { GEMINI_CHOICES, GEMINI_DEFAULT_VOICE, GEMINI_LOOK_VOICES, GEMINI_MODEL,
 import { createSecrets, retryLoad, runInput } from './secrets.mjs';
 import { showTrayIcon } from './wintray.mjs';
 import { createActivity } from './activity.mjs';
-import { canCircle, canSnap, cleanMics, talkChords, hasHands, hasHotkeys, hasVoice, hasWakeWord, linuxSession, micTrouble, needsVoiceModel, platformLine, samePair, seesPointer, writeChord, writeChords } from './platform.mjs';
+import { canCircle, canDictate, canSnap, cleanMics, talkChords, hasHands, hasHotkeys, hasVoice, hasWakeWord, linuxSession, micTrouble, needsVoiceModel, platformLine, samePair, seesPointer, writeChord, writeChords } from './platform.mjs';
 import { openAuth, accountKeys, fallbackModel, keyCards, keyKinds, seesImages, signInCards } from './providers.mjs';
 import { OLLAMA, connectLocal, contextNote, downNote, forgetLocal, isSmallModel, newServer, noModelsNote, serverFor, serverList, syncLocal as syncServers, withWindow } from './local.mjs';
 import { activityLogs, buildReport, redact, reportDir, reportName, reveal, run, scrubConfig, tail } from './diagnostics.mjs';
@@ -306,7 +306,11 @@ const MOD_WORD = process.platform === 'darwin'
   ? { control: 'Control', option: 'Option', shift: 'Shift', command: 'Command' }
   : { control: 'Ctrl', option: 'Alt', shift: 'Shift', command: LINUX ? 'Super' : 'Win' };
 // write: the type-to-ask pair (a quick tap of two modifier keys), never the same pair as talk (platform.mjs).
-const keys = () => { const k = { ...DEFAULT_KEYS, ...(config.keys ?? {}) }; return { ...k, write: writeChord(process.platform, k.talk, k.write) }; };
+// dictate: Right Shift alone (Windows), or null when off.
+const keys = () => {
+  const k = { ...DEFAULT_KEYS, ...(config.keys ?? {}) };
+  return { ...k, write: writeChord(process.platform, k.talk, k.write), dictate: canDictate(process.platform) ? (k.dictate === null ? null : 'rshift') : undefined };
+};
 const sortMods = (m) => [...m].sort((a, b) => MOD_ORDER.indexOf(a) - MOD_ORDER.indexOf(b));
 const talkSymbols = () => (process.platform === 'darwin' ? sortMods(keys().talk).map((m) => MOD_SYMBOL[m]).join('') : talkWords());
 const talkWords = () => sortMods(keys().talk).map((m) => MOD_WORD[m]).join('+');
@@ -337,6 +341,7 @@ function applyKeys(m) {
     }
     next.write = m.write === 'off' ? null : m.write;
   }
+  if (canDictate(process.platform) && (m.dictate === null || m.dictate === 'rshift')) next.dictate = m.dictate;
   for (const which of ['summon', 'snap', 'list']) {
     if (m[which] === undefined) continue;
     if (!validSummon(m[which])) return 'Use at least one of Control, Option or Command, plus a key.';
@@ -2271,6 +2276,7 @@ function panelState() {
     // The Shortcuts page: the talk pairs, and the other shortcuts as people on this computer say them.
     shortcuts: HOTKEYS_OK ? {
       talk: VOICE_OK ? { value: sortMods(keys().talk).join('+'), pairs: talkChords(process.platform).map((c) => [sortMods(c).join('+'), pairWords(c)]) } : null,
+      dictate: canDictate(process.platform) ? keys().dictate === 'rshift' : null,
       keys: ['summon', ...(SNAP_OK ? ['snap'] : []), 'list'].map((w) => ({ id: w, words: keyWords(keys()[w]) })),
     } : null,
     // The Shortcuts page's type-to-ask pick: the pairs talk isn't using, or off.
@@ -2542,6 +2548,7 @@ async function onMenu(id, via) {
     if (p === 'local') measureLocal(config.model).catch(() => {});
   } else if (id.startsWith('write:') && HOTKEYS_OK) keysFromPanel({ write: id === 'write:off' ? 'off' : id.slice(6).split('+') }); // #65
   else if (id.startsWith('talk:') && HOTKEYS_OK) keysFromPanel({ talk: id.slice(5).split('+') });
+  else if (id === 'dictate' && canDictate(process.platform)) keysFromPanel({ dictate: keys().dictate ? null : 'rshift' });
   else if (id.startsWith('shortcut:') && HOTKEYS_OK) {
     const [, which, accel] = id.split(':');
     if (['summon', 'snap', 'list'].includes(which)) keysFromPanel({ [which]: accel });

@@ -73,6 +73,9 @@ export const hasVoice = (platform) => platform === 'darwin' || platform === 'win
 /** The speech model has to be downloaded first (Parakeet): Windows and Linux. */
 export const needsVoiceModel = (platform) => platform === 'win32' || platform === 'linux';
 
+/** Hold Right Shift to type with the local voice helper. */
+export const canDictate = (platform) => platform === 'win32';
+
 /** The wake word ("Hey Roamies"): Apple's speech on macOS, the Parakeet helper on Windows and Linux. */
 export const hasWakeWord = (platform) => platform === 'darwin' || needsVoiceModel(platform);
 

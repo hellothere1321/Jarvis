@@ -13,6 +13,15 @@ static SNAP_ID: AtomicU32 = AtomicU32::new(0);
 static LIST_ID: AtomicU32 = AtomicU32::new(0);
 /// Id of the Esc hotkey, held only while the Roamie is on screen (0 when it isn't).
 static ESC_ID: AtomicU32 = AtomicU32::new(0);
+#[cfg(windows)]
+static DICTATION_ENABLED: AtomicBool = AtomicBool::new(true);
+
+#[cfg(windows)]
+pub(crate) fn set_dictation(app: &AppHandle, enabled: bool) {
+    DICTATION_ENABLED.store(enabled, Ordering::Relaxed);
+    let key = enabled.then_some("rshift");
+    to_voice(app, &json!({ "cmd": "dictate", "key": key }));
+}
 
 thread_local! {
     // The hotkey manager must live on the main thread; it also owns the current show/hide hotkey.
@@ -44,6 +53,10 @@ pub(crate) fn start_voice(app: &AppHandle) {
     let chord = app.state::<TalkChord>().0.lock().unwrap().join(",");
     let mut cmd = Command::new(bin);
     cmd.arg("--chord").arg(chord);
+    #[cfg(windows)]
+    if DICTATION_ENABLED.load(Ordering::Relaxed) {
+        cmd.arg("--dictate").arg("rshift");
+    }
     if let Some(dir) = app.state::<VoiceModel>().0.lock().unwrap().clone() {
         cmd.arg("--model").arg(dir);
     }
@@ -254,6 +267,10 @@ pub(crate) fn set_esc(app: &AppHandle, label: &str, on: bool) {
 }
 
 fn handle_voice(app: &AppHandle, msg: Value) {
+    // Dictation status belongs to the helper. The talk pill would close the panel or ask box.
+    if msg.get("type").and_then(Value::as_str) == Some("dictate") {
+        return;
+    }
     let mut ui = msg.clone();
     ui["kind"] = json!("voice");
     if msg.get("type").and_then(Value::as_str) == Some("buddy") {

@@ -910,6 +910,8 @@
       sc.talk ? group('Talk', 'Hold two keys to talk. Tap them to talk hands-free.', null,
         picks('Talk keys', sc.talk.pairs, sc.talk.value, (x) => act(`talk:${x}`), 'talk',
           Object.fromEntries(sc.talk.pairs.map(([id, keys]) => [id, `Hold ${keys} to talk. If they’re your typing keys, the two swap.`])))) : null,
+      typeof sc.dictate === 'boolean' ? group(null, null, null,
+        toggle('Hold Right Shift to type what you say', null, sc.dictate, () => act('dictate'), 'dictate')) : null,
       w ? group('Type to me', 'Tap two keys together to open a text box by the cursor.', null,
         picks('Type-to-ask keys', [...w.pairs, ['off', 'Off']], w.value, (x) => act(`write:${x}`), 'write',
           Object.fromEntries([...w.pairs.map(([id, keys]) => [id, `Tap ${keys} together, anywhere, to type to me.`]),

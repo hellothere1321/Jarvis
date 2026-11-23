@@ -10,7 +10,7 @@
 // pause. With the wake word on, the mic stays open between takes and each thing said is read once, on this PC, for
 // "Hey Roamies" (wake.rs); hearing it starts a hands-free take. Exits when stdin closes.
 //
-// roamies-voice --model <dir> [--chord control,option]   normal use (Roamies starts it)
+// roamies-voice --model <dir> [--chord control,option] [--dictate rshift]   normal use (Roamies starts it)
 // roamies-voice … --ort <library>                          ONNX Runtime to load (default: the one beside this helper,
 //                                                         or ORT_DYLIB_PATH; fetch-onnxruntime.sh puts it in place)
 // roamies-voice --test-ort                                loads ONNX Runtime and runs a tiny model: {"type":"ort",…}
@@ -22,6 +22,8 @@
 //                                                         a take (tests/wake_e2e.rs runs it on a spoken recording)
 
 mod audio;
+#[cfg(windows)]
+mod dictation;
 mod ink;
 mod keys;
 mod onnx;
@@ -71,6 +73,21 @@ struct Job {
     last: bool,
     /// A read of something said while listening for the wake phrase.
     wake: bool,
+    #[cfg(windows)]
+    dictation_reply: Option<Sender<String>>,
+}
+
+impl Job {
+    fn new(take: u64, audio: Vec<f32>, last: bool, wake: bool) -> Self {
+        Self {
+            take,
+            audio,
+            last,
+            wake,
+            #[cfg(windows)]
+            dictation_reply: None,
+        }
+    }
 }
 
 fn model_present(dir: &Path) -> bool {
@@ -90,14 +107,18 @@ fn load_model(dir: &Path) -> Result<ParakeetTDT, String> {
     Ok(asr)
 }
 
-fn transcribe(asr: &mut ParakeetTDT, audio: Vec<f32>) -> String {
+fn transcribe(asr: &mut ParakeetTDT, audio: Vec<f32>, log_detail: bool) -> String {
     if audio.len() < RATE as usize / 5 {
         return String::new();
     }
     match asr.transcribe_samples(audio, RATE, 1, None) {
         Ok(r) => r.text.split_whitespace().collect::<Vec<_>>().join(" "),
         Err(e) => {
-            log(&format!("transcribe: {e}"));
+            if log_detail {
+                log(&format!("transcribe: {e}"));
+            } else {
+                log("dictation transcription failed");
+            }
             String::new()
         }
     }
@@ -122,7 +143,13 @@ fn spawn_engine(dir: PathBuf, tx: Sender<Ev>) -> (Sender<Job>, thread::JoinHandl
                 Some(i) => jobs.swap_remove(i),
                 None => jobs.pop().expect("at least one job"),
             };
-            let text = transcribe(&mut asr, job.audio);
+            // The dictation transcript goes straight back to the typing code.
+            #[cfg(windows)]
+            if let Some(reply) = job.dictation_reply {
+                let _ = reply.send(transcribe(&mut asr, job.audio, false));
+                continue;
+            }
+            let text = transcribe(&mut asr, job.audio, true);
             if tx.send(Ev::Text { take: job.take, text, last: job.last, wake: job.wake }).is_err() {
                 return;
             }
@@ -142,6 +169,10 @@ enum Phase {
     Holding,
     HandsFree,
     Finishing,
+    #[cfg(windows)]
+    Dictating,
+    #[cfg(windows)]
+    DictationFinishing,
 }
 
 const TAP_LIMIT: f64 = 0.25;
@@ -244,6 +275,14 @@ struct Voice {
     final_until: Option<f64>,
     test_audio: Option<PathBuf>,
     ink: ink::Ink,
+    #[cfg(windows)]
+    dictation_keys: Option<dictation::Keyboard>,
+    #[cfg(windows)]
+    dictation_hold: dictation::Hold,
+    #[cfg(windows)]
+    dictation_result: Option<Receiver<String>>,
+    #[cfg(windows)]
+    dictated_text: Option<String>,
     // Wake word: on in settings; held off while Roamies answers and speaks; resting just after a take.
     wake_on: bool,
     wake_hold: bool,
@@ -298,6 +337,14 @@ impl Voice {
             final_until: None,
             test_audio,
             ink: ink::Ink::default(),
+            #[cfg(windows)]
+            dictation_keys: None,
+            #[cfg(windows)]
+            dictation_hold: dictation::Hold::default(),
+            #[cfg(windows)]
+            dictation_result: None,
+            #[cfg(windows)]
+            dictated_text: None,
             wake_on: false,
             wake_hold: false,
             wake: wake::WakeWord::default(),
@@ -324,7 +371,7 @@ impl Voice {
         let Some(m) = keys::mask(names) else { return log(&format!("ignored chord {names:?}")) };
         if self.phase == Phase::Wake {
             self.stop_wake();
-        } else if self.phase != Phase::Idle {
+        } else if matches!(self.phase, Phase::Armed | Phase::Holding | Phase::HandsFree | Phase::Finishing) {
             self.cancel();
         }
         self.chord = m;
@@ -334,6 +381,8 @@ impl Voice {
 
     fn tick(&mut self) {
         let now = self.now();
+        #[cfg(windows)]
+        self.tick_dictation(now);
         self.tick_keys(now, keys::held());
         self.ink.set_armed(matches!(self.phase, Phase::Armed | Phase::Holding), now);
         self.ink.follow(now);
@@ -434,7 +483,115 @@ impl Voice {
                 }
             }
             Phase::Finishing => {}
+            #[cfg(windows)]
+            Phase::Dictating | Phase::DictationFinishing => {}
         }
+    }
+
+    #[cfg(windows)]
+    fn set_dictation(&mut self, enabled: bool) {
+        if enabled && self.dictation_keys.is_none() {
+            self.dictation_keys = dictation::Keyboard::watch();
+        } else if !enabled && self.dictation_keys.is_some() {
+            if matches!(self.phase, Phase::Dictating | Phase::DictationFinishing) {
+                self.end_dictation("cancelled");
+            }
+            self.dictation_keys = None;
+            self.dictation_hold = dictation::Hold::Up;
+        }
+    }
+
+    #[cfg(windows)]
+    fn tick_dictation(&mut self, now: f64) {
+        while let Some(key) = self.dictation_keys.as_ref().and_then(dictation::Keyboard::next) {
+            let available = self.engine.is_some() && matches!(self.phase, Phase::Idle | Phase::Wake);
+            match self.dictation_hold.key(key, now, available) {
+                dictation::Action::None => {}
+                dictation::Action::Finish => {
+                    self.phase = Phase::DictationFinishing;
+                    self.close_take(now);
+                }
+                dictation::Action::Cancel => {
+                    self.blocked = true; // a modifier on this press can't also start a talk take
+                    self.end_dictation("cancelled");
+                }
+            }
+        }
+        // Don't read the wake phrase from what the user is about to dictate.
+        if matches!(self.dictation_hold, dictation::Hold::Pending(_)) {
+            self.stop_wake();
+        }
+        let available = self.engine.is_some() && self.phase == Phase::Idle;
+        if self.dictation_hold.start(now, available) {
+            if keys::right_shift_down() && keys::right_shift_is_alone() {
+                self.start_dictation(now);
+            } else {
+                self.dictation_hold = dictation::Hold::Blocked;
+            }
+        }
+        if self.phase == Phase::Dictating && now - self.listen_at > MAX_SESSION {
+            self.end_dictation("cancelled");
+        } else if self.phase == Phase::DictationFinishing {
+            self.receive_dictation();
+            if self.final_until.is_some_and(|until| now >= until) {
+                self.end_dictation("cancelled");
+            } else if self.dictated_text.is_some() {
+                let keys = keys::held();
+                if keys.mods == 0 && !keys.altgr {
+                    let text = self.dictated_text.take().unwrap();
+                    self.end_dictation(if dictation::type_text(&text) { "done" } else { "cancelled" });
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn receive_dictation(&mut self) {
+        let Some(result) = self.dictation_result.as_ref() else { return };
+        match result.try_recv() {
+            Ok(text) => {
+                self.dictation_result = None;
+                let text = dictation::format(&text);
+                if text.is_empty() {
+                    self.end_dictation("empty");
+                } else {
+                    self.dictated_text = Some(text);
+                }
+            }
+            Err(mpsc::TryRecvError::Disconnected) => self.end_dictation("cancelled"),
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    #[cfg(windows)]
+    fn start_dictation(&mut self, now: f64) {
+        self.phase = Phase::Dictating;
+        self.take += 1;
+        self.listen_at = now;
+        self.last_level = now;
+        self.spoke = false;
+        self.needs_voice = true;
+        self.voice_run = 0.0;
+        if !keys::mic_allowed() || self.open_audio().is_err() {
+            return self.end_dictation("cancelled");
+        }
+        emit(json!({ "type": "dictate", "state": "listening" }));
+    }
+
+    #[cfg(windows)]
+    fn end_dictation(&mut self, state: &str) {
+        self.stop_audio();
+        self.buf.lock().unwrap().clear();
+        self.take += 1;
+        self.phase = Phase::Idle;
+        self.final_until = None;
+        self.dictation_result = None;
+        self.dictated_text = None;
+        if self.dictation_hold == dictation::Hold::Recording {
+            self.dictation_hold = dictation::Hold::Blocked;
+        }
+        self.wake_cooldown_until = self.now() + WAKE_COOLDOWN;
+        emit(json!({ "type": "dictate", "state": state }));
     }
 
     fn end(&self, why: &str, now: f64) {
@@ -522,7 +679,7 @@ impl Voice {
         }
         self.read_at = now;
         self.read_len = audio.len();
-        self.reading = engine.send(Job { take: self.take, audio, last: false, wake: false }).is_ok();
+        self.reading = engine.send(Job::new(self.take, audio, false, false)).is_ok();
     }
 
     fn finish(&mut self) {
@@ -546,8 +703,19 @@ impl Voice {
     fn close_take(&mut self, now: f64) {
         self.stop_audio();
         let audio = std::mem::take(&mut *self.buf.lock().unwrap());
+        let job = Job::new(self.take, audio, true, false);
+        #[cfg(windows)]
+        let job = if self.phase == Phase::DictationFinishing {
+            let (reply, result) = mpsc::channel();
+            self.dictation_result = Some(result);
+            Job { dictation_reply: Some(reply), ..job }
+        } else {
+            job
+        };
         match &self.engine {
-            Some(engine) if self.spoke && engine.send(Job { take: self.take, audio, last: true, wake: false }).is_ok() => self.final_until = Some(now + FINAL_TIMEOUT),
+            Some(engine) if self.spoke && engine.send(job).is_ok() => self.final_until = Some(now + FINAL_TIMEOUT),
+            #[cfg(windows)]
+            _ if self.phase == Phase::DictationFinishing => self.end_dictation("empty"),
             _ => self.finalize(),
         }
     }
@@ -685,6 +853,8 @@ impl Voice {
                 self.finish();
             }
             Phase::Finishing => {}
+            #[cfg(windows)]
+            Phase::Dictating | Phase::DictationFinishing => {}
         }
     }
 
@@ -725,6 +895,10 @@ impl Voice {
 
     // Never asks for anything: wake listening starts only once the model is there and the mic is allowed.
     fn wake_allowed(&mut self, now: f64) -> bool {
+        #[cfg(windows)]
+        if matches!(self.dictation_hold, dictation::Hold::Pending(_)) {
+            return false;
+        }
         if !self.wake_on || self.wake_hold || self.engine.is_none() || now < self.wake_cooldown_until || now < self.wake_retry_at {
             return false;
         }
@@ -790,7 +964,7 @@ impl Voice {
                     buf[start.min(buf.len())..].to_vec()
                 };
                 if let Some(engine) = &self.engine {
-                    self.wake_reading = engine.send(Job { take: self.take, audio, last: false, wake: true }).is_ok();
+                    self.wake_reading = engine.send(Job::new(self.take, audio, false, true)).is_ok();
                 }
                 return;
             }
@@ -814,6 +988,10 @@ impl Voice {
             return;
         }
         self.wake_reading = false;
+        #[cfg(windows)]
+        if self.dictation_keys.is_some() && keys::right_shift_down() {
+            return;
+        }
         let scan = self.wake.scan(&text);
         let Some(rest) = scan.rest else {
             if !text.is_empty() {
@@ -874,6 +1052,12 @@ impl Voice {
                     let mods: Vec<String> = msg.get("mods").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default();
                     self.set_chord(&mods);
                 }
+                #[cfg(windows)]
+                Some("dictate") => match msg.get("key") {
+                    Some(Value::Null) => self.set_dictation(false),
+                    Some(Value::String(key)) if key == "rshift" => self.set_dictation(true),
+                    _ => {}
+                },
                 // Muting the speakers while listening is macOS-only for now.
                 _ => {}
             },
@@ -881,6 +1065,11 @@ impl Voice {
             Ev::Level(v) => self.on_level(v),
             Ev::AudioFailed(e) => {
                 log(&format!("audio stream: {} ({})", e.detail, e.reason));
+                #[cfg(windows)]
+                if self.phase == Phase::Dictating {
+                    self.end_dictation("cancelled");
+                    return false;
+                }
                 if self.phase == Phase::Wake {
                     // Wake listening never bothers the user: it tries again later.
                     self.stop_wake();
@@ -896,6 +1085,10 @@ impl Voice {
             Ev::EngineFailed(e) => {
                 self.engine = None;
                 self.engine_error = Some(e);
+                #[cfg(windows)]
+                if matches!(self.phase, Phase::Dictating | Phase::DictationFinishing) {
+                    self.end_dictation("cancelled");
+                }
             }
         }
         false
@@ -942,7 +1135,7 @@ fn main() {
         let mut asr = load_model(&dir).unwrap_or_else(|e| panic!("model: {e}"));
         let (samples, rate) = audio::read_wav(Path::new(&wav)).unwrap_or_else(|e| panic!("{wav}: {e}"));
         let t0 = Instant::now();
-        let text = transcribe(&mut asr, samples.clone());
+        let text = transcribe(&mut asr, samples.clone(), true);
         emit(json!({ "text": text, "seconds": (t0.elapsed().as_secs_f64() * 100.0).round() / 100.0, "audio": samples.len() as f64 / rate as f64 }));
         return;
     }
@@ -964,6 +1157,10 @@ fn main() {
     }
     if let Some(c) = arg(&args, "--chord") {
         voice.set_chord(&c.split(',').map(str::to_owned).collect::<Vec<_>>());
+    }
+    #[cfg(windows)]
+    if arg(&args, "--dictate").as_deref() == Some("rshift") {
+        voice.set_dictation(true);
     }
 
     let stdin_tx = tx.clone();
@@ -1158,6 +1355,32 @@ mod tests {
         v.tick();
         assert!(jobs.try_recv().is_err(), "silence isn't read (Parakeet makes words up from it)");
         assert_eq!(v.phase, Phase::Idle);
+        let _ = std::fs::remove_file(wav);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dictation_keeps_the_talk_chord_and_the_transcript_out_of_talk() {
+        let (mut v, jobs, wav) = voice();
+        v.phase = Phase::Dictating;
+        v.tick_keys(0.0, keys::Held { mods: v.chord, altgr: false });
+        v.toggle();
+        assert_eq!(v.phase, Phase::Dictating);
+        v.phase = Phase::DictationFinishing;
+        v.spoke = true;
+        v.close_take(1.0);
+        let job = jobs.try_recv().expect("dictation uses the same engine");
+        assert!(job.last && !job.wake);
+        let reply = job.dictation_reply.expect("dictation has a private reply channel");
+        reply.send("Hello world.".into()).unwrap();
+        v.receive_dictation();
+        assert!(v.best.is_empty());
+        assert_eq!(v.dictated_text.as_deref(), Some("Hello world. "));
+        v.end_dictation("cancelled");
+        assert!(reply.send("Hello again.".into()).is_err());
+        assert!(v.best.is_empty() && v.dictated_text.is_none());
+        v.tick_keys(2.0, keys::Held { mods: v.chord, altgr: false });
+        assert_eq!(v.phase, Phase::Idle, "the old chord press doesn't start a take");
         let _ = std::fs::remove_file(wav);
     }
 
