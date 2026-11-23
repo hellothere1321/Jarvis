@@ -41,7 +41,7 @@ import { EMOTES, EchoFilter, ReplyStream } from './reply.mjs';
 import { downloadModel, isReady, modelDir, sizeLabel, totalBytes } from './voicemodel.mjs';
 import { copyText, createTools, expand, fitImage, imageBlock, launch, meetingTools, oneYesNoAtATime, PLANNER_TOOLS, winOpen } from './tools.mjs';
 import { quick } from './quick.mjs';
-import { createMeetings } from './meetings.mjs';
+import { createMeetings, parseNames } from './meetings.mjs';
 import { describeMarks } from './marks.mjs';
 import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
@@ -145,6 +145,7 @@ const DEFAULTS = {
   fishModel: FISH_CHOICES[0].id, // Drama 3 (most expressive) or S2.1 Pro (natural pace, cheaper)
   geminiVoices: {}, // look → the Gemini voice it speaks in, where picked in the setup guide or the panel (else GEMINI_LOOK_VOICES)
   geminiModel: GEMINI_MODEL, // Flash Lite (quick, cheaper) or Flash (studio quality)
+  names: [], // names and product words the transcript reader fixes; one per line on the Meetings page
 };
 const LINUX = process.platform === 'linux';
 // Linux: "x11" or "wayland" (the app says which). Wayland keeps apps from seeing the pointer over other apps and
@@ -212,6 +213,7 @@ let shellInfo = null; // resolves the shell's reply to it: screens, tray, panel,
     if (config[one]) config[each] = { [config.look ?? 'classic']: config[one], ...config[each] };
     delete config[one];
   }
+  config.names = parseNames(config.names);
 }
 // Hybrid models (route.mjs): while a heavy job runs on its own model, config.provider and config.model hold that model
 // and `defaultPick` holds the user's default. Only the default is ever saved.
@@ -657,15 +659,19 @@ const meetings = process.platform === 'win32' ? createMeetings({
   call: (msg) => shellCall(msg, 20_000),
   changed: () => meetingsChanged(),
   notify: (text, bad) => { say(text, bad ? 'concerned' : 'happy'); panelNote(text, bad); },
+  names: () => config.names,
+  // The same tool-less side call folds and memory use, on the user's own sign-in, never in the chat session.
+  model: async ({ system, text }) => (await oneShot({ ...(await sideRoute()), system, text })).text,
 }) : null;
 async function startMeeting() {
   if (!voiceReady()) throw new Error('Download the speech model on the Meetings page before recording.');
   return meetings.start();
 }
-async function openMeeting(id) {
-  await meetings.read(id);
+async function openMeeting(id, options) {
+  const transcript = await meetings.read(id, options);
   panelMeeting = id;
   openPanel('meetings');
+  return transcript;
 }
 const localMeetingTools = meetings ? meetingTools({ ...meetings, start: startMeeting, open: openMeeting }) : [];
 const meetingToolNames = new Set(localMeetingTools.map((t) => t.name));
@@ -2340,7 +2346,9 @@ function meetingsChanged() {
   meetingsTimer = setTimeout(async () => {
     meetingsTimer = null;
     try {
-      const rows = (await meetings.list()).map(({ folder, ...row }) => row);
+      const rows = await Promise.all((await meetings.list()).map(async ({ folder, summary, ...row }) => ({
+        ...row, summary: summary ? await meetings.summary(row.id).catch(() => null) : null,
+      })));
       if (panelOpen) send({ type: 'panel', msg: { kind: 'meetings', ...meetings.state(), rows } });
     } catch {
       panelNote('Could not list the meeting recordings.', true);
@@ -2357,11 +2365,20 @@ async function meetingPanel(m) {
       const transcript = await meetings.read(m.id);
       send({ type: 'panel', msg: { kind: 'meeting_transcript', ...transcript } });
     }
+    if (m.action === 'names' && typeof m.text === 'string') {
+      config.names = parseNames(m.text);
+      saveConfig(); menu();
+      panelNote(`Saved ${config.names.length} name${config.names.length === 1 ? '' : 's'}.`);
+    }
+    if (m.action === 'summarise') await meetings.summarise(m.id);
     if (m.action === 'delete' && m.confirmed === true) {
       await meetings.remove(m.id, { confirm: () => true });
     }
   } catch (e) {
-    panelNote(e.message, true);
+    // One short line: the model's own error may be a whole response.
+    panelNote(String(e?.message ?? e).split('\n')[0].slice(0, 160), true);
+  } finally {
+    if (m.action === 'summarise' || m.action === 'delete') meetingsChanged();
   }
 }
 function panelState() {
@@ -2376,6 +2393,7 @@ function panelState() {
     busy, canNew: !busy && !!session?.messages.length,
     meetingRecording: !!meetings?.state().active,
     meetingDownload: meetings && !voiceReady() ? speechModelDownload() : null,
+    meetingNames: (config.names ?? []).join('\n'),
     // The type-to-ask shortcut, for the Ask button's tooltip (none on Wayland).
     askKeys: HOTKEYS_OK ? writeSymbols() || null : null,
     // The Shortcuts page: the talk pairs, and the other shortcuts as people on this computer say them.

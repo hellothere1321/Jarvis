@@ -2,10 +2,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { baseDir } from './datadir.mjs';
-import { ASK, BLOCK, checkRead, checkWrite, classifyCommand } from './safety.mjs';
+import { buildLexicon, fixNames } from './lexicon.mjs';
+import { ASK, BLOCK, SAFE, checkRead, checkWrite, classifyCommand } from './safety.mjs';
+import { summariseTranscript } from './summarise.mjs';
 
 const ID = /^\d{4}-\d{2}-\d{2} \d{4}(?:-\d+)?$/;
-const FILES = new Set(['mic.wav', 'system.wav', 'transcript.json', 'transcript.json.tmp', 'transcription.pending', 'transcription.failed']);
+const FILES = new Set(['mic.wav', 'system.wav', 'transcript.json', 'transcript.json.tmp', 'transcription.pending', 'transcription.failed', 'summary.md', 'summary.md.tmp']);
 const stamp = (date) => {
   const two = (n) => String(n).padStart(2, '0');
   return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())} ${two(date.getHours())}${two(date.getMinutes())}`;
@@ -14,11 +16,27 @@ const missing = (e) => { if (e.code !== 'ENOENT') throw e; return null; };
 const stat = (p) => fs.lstat(p).catch(missing);
 const check = (rule) => { if (rule.level === BLOCK) throw new Error(rule.reason); };
 
-export function createMeetings({ call, changed = () => {}, notify = () => {}, now = () => new Date(), base = baseDir() }) {
+/** The user's names and words: one per line, at most 500, at most three words each. */
+export function parseNames(value) {
+  const lines = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/\r?\n/) : [];
+  const out = [], seen = new Set();
+  for (const line of lines) {
+    const name = String(line ?? '').trim().replace(/\s+/g, ' ');
+    if (!name || name.split(' ').length > 3) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+    if (out.length === 500) break;
+  }
+  return out;
+}
+
+export function createMeetings({ call, changed = () => {}, notify = () => {}, now = () => new Date(), base = baseDir(), names = () => [], model, chunkWords }) {
   base = path.resolve(base);
   const root = path.join(base, 'Roamies', 'Meetings');
   let active = null, switching = false;
-  const progress = new Map(), offline = new Set();
+  const progress = new Map(), offline = new Set(), summarising = new Set();
 
   async function checkRoot() {
     const real = await fs.realpath(root).catch(missing);
@@ -59,7 +77,7 @@ export function createMeetings({ call, changed = () => {}, notify = () => {}, no
       : Math.max(0, (Math.max(...wavs.map((wav) => wav?.size ?? 44)) - 44) / 32000);
     const status = active === id ? 'recording' : progress.has(id) || await transcribing(folder) ? 'transcribing'
       : await file(folder, 'transcript.json') ? 'ready' : await file(folder, 'transcription.failed') ? 'failed' : 'audio_saved';
-    return { id, folder, date: info.birthtime.toISOString(), duration, status, pct: progress.get(id) };
+    return { id, folder, date: info.birthtime.toISOString(), duration, status, pct: progress.get(id), summary: !!(await file(folder, 'summary.md')) };
   }
   async function list() {
     check(checkRead(root, base));
@@ -68,17 +86,56 @@ export function createMeetings({ call, changed = () => {}, notify = () => {}, no
     const rows = await Promise.all(entries.filter((e) => e.isDirectory() && ID.test(e.name)).map((e) => row(e.name).catch(() => null)));
     return rows.filter(Boolean).sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
   }
-  async function read(id) {
+  async function summaryOf(folder) {
+    if (!await file(folder, 'summary.md')) return null;
+    return fs.readFile(path.join(folder, 'summary.md'), 'utf8');
+  }
+  async function summary(id) {
+    const { folder } = await folderOf(id);
+    return summaryOf(folder);
+  }
+  // Names are applied here, never to the saved transcript: changing the list fixes old meetings too.
+  async function read(id, { summary: wantSummary = false } = {}) {
     const { folder } = await folderOf(id);
     if (!await file(folder, 'transcript.json')) throw new Error('This meeting has no transcript yet.');
+    let fixed;
     try {
       const { segments } = JSON.parse(await fs.readFile(path.join(folder, 'transcript.json'), 'utf8'));
       if (!Array.isArray(segments) || !segments.every((s) => typeof s?.text === 'string' &&
           Number.isFinite(s.start) && s.start >= 0 && Number.isFinite(s.end) && s.end >= s.start &&
           ['mic', 'system'].includes(s.track))) throw new Error();
-      return { id, segments };
+      const lexicon = buildLexicon(names());
+      fixed = segments.map((s) => ({ ...s, text: fixNames(s.text, lexicon).text }));
     } catch {
       throw new Error('The transcript could not be read.');
+    }
+    return wantSummary ? { id, segments: fixed, summary: await summaryOf(folder) } : { id, segments: fixed };
+  }
+  // Only the panel's Summarise button (or an explicit request) gets here. The words go to the model and the panel,
+  // never to a log; the result lands in summary.md in one rename, after every model call has succeeded.
+  async function summarise(id) {
+    if (summarising.has(id)) throw new Error('This meeting is already being summarised.');
+    await folderOf(id);
+    const { segments } = await read(id);
+    summarising.add(id);
+    changed();
+    try {
+      const markdown = await summariseTranscript({ segments, model, ...(chunkWords == null ? {} : { per: chunkWords }) });
+      // The folder may have been removed or replaced while the model was working.
+      const { folder } = await folderOf(id);
+      const target = path.join(folder, 'summary.md'), tmp = path.join(folder, 'summary.md.tmp');
+      for (const [p, exists] of [[target, !!(await file(folder, 'summary.md'))], [tmp, !!(await file(folder, 'summary.md.tmp'))]]) {
+        const verdict = checkWrite(p, base, { exists, own: folder });
+        check(verdict);
+        if (verdict.level !== SAFE) throw new Error(verdict.reason);
+      }
+      await fs.writeFile(tmp, markdown, 'utf8');
+      await fs.rename(tmp, target);
+      changed();
+      return markdown;
+    } finally {
+      summarising.delete(id);
+      changed();
     }
   }
   async function remove(id, { confirm } = {}) {
@@ -171,5 +228,5 @@ export function createMeetings({ call, changed = () => {}, notify = () => {}, no
       changed();
     }
   }
-  return { list, read, remove, start, stop, handle, state: () => ({ active, switching, offline: [...offline] }) };
+  return { list, read, summary, summarise, remove, start, stop, handle, state: () => ({ active, switching, offline: [...offline] }) };
 }

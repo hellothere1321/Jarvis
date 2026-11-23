@@ -1102,7 +1102,7 @@
 
   // ---------------------------------------------------------------- meetings
   const meetingRequest = (action, id, confirmed) => send({ type: 'meeting_panel', action, id, confirmed });
-  let meetingData = null, meetingTranscript = null, meetingWanted = null;
+  let meetingData = null, meetingTranscript = null, meetingWanted = null, meetingBusy = null;
   const meetingTrack = (track) => track === 'mic' ? 'Microphone' : 'Computer audio';
   const meetingTime = (seconds) => {
     const s = Math.floor(seconds), two = (n) => String(n).padStart(2, '0');
@@ -1132,6 +1132,10 @@
     const text = active ? 'Recording microphone and computer audio.' : download ? 'Parakeet transcribes the recording on this PC.' : 'Record the default microphone and computer audio.';
     const offline = data?.offline.length && `${data.offline.map(meetingTrack).join(' and ')} unavailable. Waiting for the device to reconnect.`;
     const statuses = { recording: 'Recording', transcribing: 'Transcribing', ready: 'Transcript ready', failed: 'Transcription failed', audio_saved: 'Audio saved' };
+    const names = el('textarea', {
+      id: 'meeting-names', className: 'px meeting-names', rows: 4, value: state.meetingNames ?? '',
+      placeholder: 'Mira Voss\nKorbett', spellcheck: false, 'aria-label': 'Names and words', 'data-k': 'meeting-names',
+    });
     return [
       group('Meetings', text, null, control, offline ? el('p', { className: 'why', role: 'status', textContent: offline }) : null),
       data?.rows.length ? el('ul', { className: 'list' }, data.rows.map((m) => {
@@ -1141,9 +1145,18 @@
           el('span', {}, date, el('small', { textContent: `${meetingTime(m.duration)} · ${statuses[m.status]}${progress}` })),
           el('span', { className: 'row-btns' },
             m.status === 'ready' && link('Transcript', () => readMeeting(m.id), { k: 'meeting-read-' + m.id }),
+            m.status === 'ready' && link(meetingBusy === m.id ? 'Summarising…' : m.summary ? 'Summarise again' : 'Summarise', () => {
+              meetingBusy = m.id;
+              meetingRequest('summarise', m.id);
+              render();
+            }, { k: 'meeting-summarise-' + m.id, disabled: !!meetingBusy }),
             !['recording', 'transcribing'].includes(m.status) && armed('Delete', 'Confirm delete', 'meeting-delete-' + m.id,
-              () => meetingRequest('delete', m.id, true), `Delete meeting from ${date}`)));
+              () => meetingRequest('delete', m.id, true), `Delete meeting from ${date}`)),
+          m.summary ? el('div', { className: 'meeting-summary' }, el('b', { textContent: 'Summary' }), el('p', { textContent: m.summary })) : null);
       })) : el('p', { className: 'empty', textContent: data ? 'No meetings recorded.' : 'Loading meetings…' }),
+      group('Names and words', 'One per line. Fixes old transcripts too, whenever you open them again.', null,
+        names,
+        btn('Save names', () => send({ type: 'meeting_panel', action: 'names', text: names.value }), { k: 'meeting-names-save', kind: 'primary' })),
     ];
   }
   $('nav-memory').parentElement.after(el('li', { hidden: true },
@@ -1491,6 +1504,7 @@
     }
     else if (m.kind === 'meetings') {
       meetingData = m;
+      meetingBusy = null;
       if (tab === 'meetings' && !meetingTranscript) render();
     }
     else if (m.kind === 'meeting_transcript' && m.id === meetingWanted && tab === 'meetings') {

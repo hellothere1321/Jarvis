@@ -46,9 +46,13 @@ export function meetingTools(meetings) {
     },
     {
       name: 'read_meeting',
-      description: 'Open a meeting transcript in the local Meetings page for the user to read. Use its folder name from list_meetings.',
-      parameters: z.object({ id: z.string().max(40) }),
-      execute: async ({ id }) => { await meetings.open(id); return `Opened the transcript for ${id} in Meetings.`; },
+      description: 'Open a meeting transcript in the local Meetings page for the user to read. Use its folder name from list_meetings. Set summary true to get the saved markdown summary back instead of just opening the transcript.',
+      parameters: z.object({ id: z.string().max(40), summary: z.boolean().optional() }),
+      execute: async ({ id, summary }) => {
+        const result = await meetings.open(id, { summary: !!summary });
+        if (!summary) return `Opened the transcript for ${id} in Meetings.`;
+        return result?.summary ?? 'No summary saved for this meeting yet.';
+      },
     },
   ];
 }
