@@ -29,6 +29,7 @@ import {
   touchFacts, forDisk, forProvider, loadLatestSession, newSession, openCommitments, pruneSessions, readJson, saveSession, takeDueReminders, updateCommitment, writeJson,
 } from './store.mjs';
 import * as planner from './planner.mjs';
+import * as importer from './importer.mjs';
 import * as habits from './habits.mjs';
 import * as coach from './coach.mjs';
 import { createGoogleSync } from './googlesync.mjs';
@@ -2375,6 +2376,45 @@ function panel() {
 let panelTab = null, panelMeeting = null;
 function openPanel(tab) { panelTab = tab; send({ type: 'panel_show' }); if (panelOpen) panel(); }
 const panelNote = (text, bad = false, p = null) => panelOpen && send({ type: 'panel', msg: { kind: 'note', text, bad, ...(p ? linked(p) : {}) } });
+// Import from VowenLite (Windows): the panel asks for a dry run, then for the kinds the user ticked. Only counts and
+// plain sentences go back; the importer never returns item text, and saved-login passwords stay inside vault.save.
+let vowenSeen = { at: 0, found: false };
+const vowenFound = () => {
+  if (process.platform !== 'win32') return false;
+  if (Date.now() - vowenSeen.at > 30_000) vowenSeen = { at: Date.now(), found: !!importer.findVowenLite() };
+  return vowenSeen.found;
+};
+async function applyImportedSettings(patch) {
+  if (patch.quietHours) config.quietHours = { ...quietHours(), ...patch.quietHours };
+  if (patch.distractions) config.distractions = patch.distractions;
+  if (patch.names) config.names = parseNames([...(config.names ?? []), ...patch.names]);
+  if (typeof patch.voice === 'boolean' && patch.voice !== !!config.voice) {
+    config.voice = patch.voice; voiceConfig();
+    if (config.voice && !voiceReady()) startVoiceDownload();
+  }
+  await saveConfig(); menu();
+}
+async function vowenImport(m) {
+  const reply = (msg) => panelOpen && send({ type: 'panel', msg: { kind: 'vowen_import', ...msg } });
+  try {
+    if (!vowenFound()) throw new importer.ImportError("VowenLite's data wasn't found on this PC.");
+    if (m.action === 'scan') return reply({ phase: 'scan', ...importer.scan() });
+    if (m.action !== 'run') return;
+    const kinds = (Array.isArray(m.kinds) ? m.kinds : []).filter((k) => importer.KINDS.includes(k));
+    if (!kinds.length) throw new importer.ImportError('Choose what to import.');
+    reply({ phase: 'running' });
+    const result = await importer.run({ kinds, vault, feeds, applySettings: applyImportedSettings });
+    logLine('vowen_import', { kinds, added: Object.fromEntries(Object.entries(result.kinds).map(([k, v]) => [k, v.added])) });
+    reply({ phase: 'done', result: result.kinds, problems: result.problems, notes: result.notes });
+    if (result.kinds.feeds?.added) feeds.refresh().catch(() => {});
+    if (result.kinds.settings?.added) googleSync.init().catch(() => {});
+    if (result.kinds.meetings?.added) meetingsChanged();
+    scheduleReminders(); panel();
+  } catch (e) {
+    logLine('vowen_import_error', { kind: e?.name });
+    reply({ phase: 'error', text: e instanceof importer.ImportError ? e.message : "The import didn't finish. Nothing in VowenLite was changed." });
+  }
+}
 let meetingsTimer;
 function meetingsChanged() {
   if (!panelOpen || meetingsTimer) return;
@@ -2429,6 +2469,7 @@ function panelState() {
     busy, canNew: !busy && !!session?.messages.length,
     meetingRecording: !!meetings?.state().active,
     meetingDownload: meetings && !voiceReady() ? speechModelDownload() : null,
+    ...(vowenFound() ? { vowen: true } : {}),
     meetingNames: (config.names ?? []).join('\n'),
     // The type-to-ask shortcut, for the Ask button's tooltip (none on Wayland).
     askKeys: HOTKEYS_OK ? writeSymbols() || null : null,
@@ -3107,6 +3148,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'planner' && typeof m.op === 'string') plannerFromPanel(m.op, m.data).catch((e) => console.error('planner', e));
   else if (m.type === 'panel_open') { panelOpen = true; panelAt = Date.now(); logLine('panel_open', {}); if (VOICE_OK) send({ type: 'voice_mics' }); if (meetings) meetingsChanged(); Promise.all([refreshAuth(), signedIn.get('local') && syncLocal(), tts().local && speech.checkLocal()]).catch(() => {}).finally(() => { panel(); refreshCatalogs(); }); }
   else if (m.type === 'meeting_panel') meetingPanel(m);
+  else if (m.type === 'vowen_import') vowenImport(m);
   else if (m.type === 'meeting' && meetings) {
     meetings.handle(m);
     shellAnswer(m);

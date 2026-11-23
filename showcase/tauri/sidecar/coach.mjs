@@ -17,12 +17,12 @@ export function getSay() { return sayFn; }
 function loadState() {
   try {
     const data = readJson(file);
-    if (data && typeof data === 'object') return { roll: '', week: '', esc: {}, ...data, esc: data.esc ?? {} };
+    if (data && typeof data === 'object') return { roll: '', week: '', ...data, esc: data.esc ?? {} };
   } catch {}
   try {
     if (existsSync(file)) {
       const parsed = JSON.parse(readFileSync(file, 'utf8'));
-      if (parsed && typeof parsed === 'object') return { roll: '', week: '', esc: {}, ...parsed, esc: parsed.esc ?? {} };
+      if (parsed && typeof parsed === 'object') return { roll: '', week: '', ...parsed, esc: parsed.esc ?? {} };
     }
   } catch {}
   return { roll: '', week: '', esc: {} };

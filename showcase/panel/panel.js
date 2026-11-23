@@ -994,6 +994,49 @@
     };
   }
   // What I may do, and when I start.
+  // ---- Import from VowenLite (Windows): a dry run first, then only what was ticked ----
+  const VOWEN = [['planner', 'Tasks and calendar'], ['timelog', 'Time log'], ['inbox', 'Inbox'], ['feeds', 'Calendar feeds'], ['vault', 'Saved logins'], ['threads', 'Chats'], ['meetings', 'Meeting notes'], ['settings', 'Settings']];
+  let vowen = { phase: 'idle', scan: null, picks: new Set(), result: null, text: null };
+  function vowenMsg(m) {
+    if (m.phase === 'scan') {
+      const kinds = m.kinds ?? {};
+      vowen = { phase: 'ready', scan: { kinds, problems: m.problems ?? [], notes: m.notes ?? [] }, picks: new Set(VOWEN.map(([k]) => k).filter((k) => kinds[k]?.new > 0)), result: null, text: null };
+    } else if (m.phase === 'running') vowen = { ...vowen, phase: 'running', text: null };
+    else if (m.phase === 'done') vowen = { phase: 'done', scan: null, picks: new Set(), result: { kinds: m.result ?? {}, problems: m.problems ?? [], notes: m.notes ?? [] }, text: null };
+    else vowen = { phase: 'error', scan: null, picks: new Set(), result: null, text: String(m.text ?? "The import didn't finish.") };
+    if (tab === 'general') render();
+  }
+  function vowenGroup() {
+    const ask = (action, extra = {}) => { send({ type: 'vowen_import', action, ...extra }); };
+    const line = (text, k) => el('p', { className: 'why', role: 'status', textContent: text, 'data-k': k });
+    const scanBtn = (label) => btn(label, () => { vowen = { ...vowen, phase: 'scanning', text: null }; ask('scan'); render('vowen-scan'); }, { k: 'vowen-scan', disabled: vowen.phase === 'scanning' });
+    const head = ['Import from VowenLite', 'Bring your planner, time log, saved logins, chats and meeting notes over from the old app. Nothing in VowenLite is changed, and you see what is there before anything is imported.'];
+    if (vowen.phase === 'ready') {
+      const { kinds, problems, notes } = vowen.scan;
+      const rows = VOWEN.filter(([k]) => kinds[k]?.found > 0);
+      if (!rows.length) return group(...head, null, line('There is nothing to import.', 'vowen-none'), ...problems.map((t, i) => line(t, `vowen-p${i}`)), scanBtn('Check again'));
+      return group(...head, null,
+        ...rows.map(([k, label]) => {
+          const n = kinds[k];
+          return toggle(label, n.new ? `${n.new} new, ${n.found} in VowenLite` : `Already imported (${n.found})`, vowen.picks.has(k) && n.new > 0,
+            () => { if (!n.new) return; if (vowen.picks.has(k)) vowen.picks.delete(k); else vowen.picks.add(k); render(`vowen-${k}`); }, `vowen-${k}`);
+        }),
+        ...[...problems, ...notes].map((t, i) => line(t, `vowen-n${i}`)),
+        el('span', { className: 'row-btns' },
+          btn('Import', () => { const kindsPicked = VOWEN.map(([k]) => k).filter((k) => vowen.picks.has(k)); vowen = { ...vowen, phase: 'running' }; ask('run', { kinds: kindsPicked }); render('vowen-run'); }, { k: 'vowen-run', kind: 'primary', disabled: !vowen.picks.size }),
+          scanBtn('Check again')));
+    }
+    if (vowen.phase === 'running') return group(...head, null, btn('Importing…', () => {}, { k: 'vowen-run', kind: 'primary', disabled: true }));
+    if (vowen.phase === 'done') {
+      const { kinds, problems, notes } = vowen.result;
+      const lines = VOWEN.filter(([k]) => kinds[k]).map(([k, label]) => {
+        const r = kinds[k];
+        return `${label}: ${r.added} added${r.already ? `, ${r.already} already there` : ''}${r.failed ? `, ${r.failed} couldn't be imported` : ''}`;
+      });
+      return group(...head, null, ...lines.map((t, i) => line(t, `vowen-r${i}`)), ...[...problems, ...notes].map((t, i) => line(t, `vowen-n${i}`)), scanBtn('Check again'));
+    }
+    return group(...head, null, vowen.text ? line(vowen.text, 'vowen-error') : null, scanBtn(vowen.phase === 'scanning' ? 'Checking…' : vowen.phase === 'error' ? 'Try again' : 'See what can be imported'));
+  }
   function generalPage() {
     const google = state.googleSync;
     const clientFile = google && !google.connected ? el('input', {
@@ -1037,6 +1080,7 @@
             clientFile ? link(google.hasClient ? 'Change client' : 'Choose JSON file', () => clientFile.click(), { k: 'google-file', disabled: !!google.busy }) : null,
             google.connected ? link('Disconnect', () => act('google-disconnect'), { k: 'google-disconnect', disabled: !!google.busy })
               : link('Connect', () => act('google-connect'), { k: 'google-connect', disabled: !!google.busy || !google.hasClient })))) : null,
+      state.vowen ? vowenGroup() : null,
     ];
   }
   // Who made Roamies: Ken, live (he's drawn like the looks but isn't one), and where to find him.
@@ -1640,6 +1684,7 @@
       $('pane-meetings').scrollTop = 0;
     }
     else if (m.kind === 'planner') plannerMsg(m);
+    else if (m.kind === 'vowen_import') vowenMsg(m);
     else if (m.kind === 'note') note(m.text, m.bad, m.copy);
     else if (m.kind === 'copied' && m.which === 'problem') note(m.ok ? 'Copied the error details. Paste them into your report.' : "Couldn't copy the error details. Try Save diagnostics.", !m.ok);
     else if (m.kind === 'copied') {
