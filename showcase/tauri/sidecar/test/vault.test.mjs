@@ -38,6 +38,7 @@ try {
   const vault = createVault({ dataDir: dir, secrets: { get: async () => k, set: async (_, v) => { k = v; } }, hands: 'fake', exec });
   const tools = createTools({ vault, allowActions: () => true }).tools;
   const fill = tools.find((t) => t.name === 'fill_login');
+  assert.ok(!tools.some((t) => t.name === 'browser_login'), 'no browser sign-in without the background browser');
   const list = tools.find((t) => t.name === 'list_logins');
   const id = await vault.save({ address: 'EXAMPLE.test', username: 'user', password });
   assert.equal(await vault.reveal(id), password);
@@ -68,6 +69,9 @@ try {
     await assert.rejects(vault.reveal(row.id), /refused/);
   }
   await fs.writeFile(file, disk);
+  // The background browser's sign-in gets the row and password; the result is whatever the browser says.
+  assert.equal(await vault.login(id, (row, user, pass) => { assert.deepEqual([row.site, row.scheme, user, pass], ['example.test', 'https', 'user', password]); return 'signed in'; }), 'signed in');
+  await assert.rejects(vault.login('00000000-0000-4000-8000-000000000000', () => 'no'), /refused/);
   changed = true;
   await assert.rejects(fill.execute({ id }), /refused/);
   assert.equal(commands.filter(([cmd]) => cmd === 'vault-fill').length, 0);

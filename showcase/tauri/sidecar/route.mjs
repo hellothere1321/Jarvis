@@ -57,7 +57,8 @@ export function jobKinds(text, { agentCheck = wantsAgent } = {}) {
 const TOOL_KIND = {
   act_in_app: 'computer', read_window: 'computer', list_windows: 'computer', take_screenshot: 'computer',
   write_file: 'code', run_command: 'code',
-  send_agent: 'agents', draw: 'draw', web_search: 'web', web_fetch: 'web',
+  send_agent: 'agents', draw: 'draw', web_search: 'web', web_fetch: 'web', browser_open: 'web', browser_read: 'web', browser_screenshot: 'web',
+  browser_act: 'computer', browser_login: 'computer',
 };
 export const kindOfTool = (name) => TOOL_KIND[name] ?? null;
 

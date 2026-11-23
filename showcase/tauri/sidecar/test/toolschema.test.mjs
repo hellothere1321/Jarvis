@@ -6,7 +6,9 @@ import { LIMITS } from '../draw.mjs';
 import { leanTools } from '../lean.mjs';
 
 const noop = async () => {};
-const { tools } = createTools({ allowActions: false, ui: () => {}, ask: async () => false, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test', focus: { start: () => 'ok', stop: () => 'ok' }, jobs: { changed: () => {}, run: async () => ({ id: 'a1' }) }, skills: { changed: () => {} } });
+const { tools } = createTools({ allowActions: false, ui: () => {}, ask: async () => false, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test', focus: { start: () => 'ok', stop: () => 'ok' }, jobs: { changed: () => {}, run: async () => ({ id: 'a1' }) }, skills: { changed: () => {} }, browser: {}, vault: { list: async () => [], publicList: () => [] } });
+// The background browser's tools are there when the app has one, and checked below with the rest.
+for (const n of ['browser_open', 'browser_read', 'browser_act', 'browser_screenshot', 'browser_show', 'browser_login']) assert.ok(tools.some((t) => t.name === n), n);
 // Focus mode's tools are there where the window in front can be read (focus given), and checked below with the rest.
 assert.ok(tools.some((t) => t.name === 'start_focus') && tools.some((t) => t.name === 'stop_focus'), 'focus tools');
 

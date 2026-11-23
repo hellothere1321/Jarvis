@@ -3,6 +3,7 @@
 // the model gets the turn as before); run() does the matching one's work. Whole-utterance matches only: anything
 // that isn't clearly one of these goes to the model.
 import { fileURLToPath } from 'node:url';
+import { siteAddress } from './browser.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { addCommitment, parseDue, parseRepeat, repeatLabel } from './store.mjs';
@@ -317,6 +318,9 @@ function openMatch(s, { home, platform }) {
   const rest = (m?.[1] ?? gt?.[1] ?? '').replace(/^["']|["']$/g, '').trim();
   if (!rest) return null;
   const site = (url, label) => ({ kind: 'open', args: { target: url, type: 'url', label }, reply: `Opening ${label}.` });
+  // Said aloud: "skool dot com", "you tube dot com slash shorts".
+  const spoken = /\bdot\b/i.test(rest) ? siteAddress(rest) : null;
+  if (spoken && !FILE_TLD.test(new URL(spoken).hostname.split('.').pop())) return site(spoken, new URL(spoken).hostname.replace(/^www\./i, ''));
   const dom = /^(?:https?:\/\/)?((?:[a-z0-9-]+\.)+([a-z]{2,24}))(?:[/?#]\S*)?$/i.exec(rest);
   if (dom && !FILE_TLD.test(dom[2])) return site(/^https?:/i.test(rest) ? rest : `https://${rest}`, dom[1].replace(/^www\./i, ''));
   const known = SITES[rest.toLowerCase().replace(/\.com$/, '').replace(/^the /, '')];

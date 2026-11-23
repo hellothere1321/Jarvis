@@ -193,6 +193,14 @@ export function createVault({ dataDir, secrets, hands, exec = runInput }) {
     await helper('vault-fill', { expected: first, username: row.username, password });
     return 'Filled the login. The form is ready for review.';
   });
+  // The background browser's sign-in (browser.mjs): the password goes from here straight into that page, never to the model.
+  const login = async (id, use) => {
+    const { row, password } = await serial(async () => {
+      const found = entry(await read(), id);
+      return { row: metadata(found), password: open(await key(), found.sealed, aad(found)) };
+    });
+    return use(row, row.username, password);
+  };
   // Only ciphertext crosses the webview bridge. Reveal and copy happen locally, outside the webview.
   async function panel(m) {
     try {
@@ -208,5 +216,5 @@ export function createVault({ dataDir, secrets, hands, exec = runInput }) {
       } else throw failed();
     } catch { throw failed(); }
   }
-  return { publicKey, list, publicList, save, remove, reveal, fill, panel };
+  return { publicKey, list, publicList, save, remove, reveal, fill, login, panel };
 }

@@ -1,6 +1,6 @@
 // The safety rules: what runs on its own, what needs a yes, what never runs. Run: npm test
 import assert from 'node:assert/strict';
-import { ASK, BLOCK, SAFE, checkDrawAction, checkLink, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isPrivateAddress, isYes, splitCommand } from '../safety.mjs';
+import { ASK, BLOCK, SAFE, checkBrowse, checkDrawAction, checkLink, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isPrivateAddress, isYes, splitCommand } from '../safety.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import { checkFill, loginOrigin } from '../safety.mjs';
@@ -23,6 +23,9 @@ import { checkFill, loginOrigin } from '../safety.mjs';
   assert.ok(!matches('https://127.1', 'https://127.0.0.1'));
   assert.ok(matches('https://xn--bcher-kva.test', 'https://bücher.test'));
   assert.equal(checkRead('~/Roamies/Data/vault.json', '/home/test').level, BLOCK);
+  // The background browser's profile holds its cookies and sign-ins.
+  assert.equal(checkRead('~/Roamies/Data/browser/Default/Cookies', '/home/test').level, BLOCK);
+  assert.equal(checkRead('~/Roamies/Data/browser', '/home/test').level, BLOCK);
 }
 import nodePath from 'node:path';
 
@@ -114,6 +117,13 @@ cases('link', checkLink, [
   ['vscode://file/x', BLOCK],
   ['https://user:pw@example.com', BLOCK],
   ['not a url', BLOCK],
+]);
+
+// The background browser: web pages only (this computer's too, like the user's own browser), no links with passwords.
+cases('browse', checkBrowse, [
+  ['https://www.skool.com/login', SAFE], ['http://localhost:3000', SAFE], ['https://duckduckgo.com/?q=!ducky%20skool', SAFE],
+  ['file:///C:/Users/x/secret.txt', BLOCK], ['javascript:alert(1)', BLOCK], ['chrome://settings', BLOCK], ['edge://settings/passwords', BLOCK],
+  ['data:text/html,<b>x</b>', BLOCK], ['https://user:pw@example.com', BLOCK], ['not a url', BLOCK],
 ]);
 
 cases('url', checkUrl, [

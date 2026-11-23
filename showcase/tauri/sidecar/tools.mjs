@@ -9,10 +9,11 @@ import { fileURLToPath } from 'node:url';
 import { createWebFetchTool, createWebSearchTool, runSideWebSearch, runSideWebSearchViaClaudeCode } from '@kenkaiiii/ggcoder/web';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, shotUnits, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, checkDrawAction, checkFetch, checkOpen, checkRead, checkWrite, classifyCommand, isRiskyClick, isYes, riskyKind } from './safety.mjs';
+import { ASK, BLOCK, checkBrowse, checkDrawAction, checkFetch, checkOpen, checkRead, checkWrite, classifyCommand, isRiskyClick, isYes, riskyKind } from './safety.mjs';
 import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, faviconFor, pickTextMatch, quizNote, readSecs, resolveTargets, unjson } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
+import { openTarget, siteAddress } from './browser.mjs';
 import { addCommitment, forgetFact, getCommitment, parseDue, parseRepeat, repeatLabel, updateCommitment } from './store.mjs';
 import * as planner from './planner.mjs';
 import * as timelog from './timelog.mjs';
@@ -325,7 +326,7 @@ function plannerFound(item, id) {
 
 export const PLANNER_TOOLS = new Set(['add_task', 'add_event', 'update_planner_item', 'complete_task', 'delete_planner_item', 'list_planner', 'time_log', 'list_inbox', 'accept_inbox_item', 'add_feed', 'remove_feed']);
 
-export function createTools({ vault = null, allowActions, ui, ask, openUrl, onCommitments, onPlanner = () => {}, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', skipAllow = () => false, jobs = null, skills = null, feeds = null }) {
+export function createTools({ vault = null, allowActions, ui, ask, openUrl, onCommitments, onPlanner = () => {}, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', skipAllow = () => false, jobs = null, skills = null, feeds = null, browser = null }) {
   // Relative paths (and run_command) start in workdir: ~/Roamies for the chat, its own folder for an agent.
   const at = (p) => { const s = String(p ?? ''); return /^~(?=$|\/|\\)/.test(s) || path.isAbsolute(s) || /^[a-z]:[\\/]/i.test(s) ? s : path.join(workdir, s); };
   const where = workdir === HOME ? "the user's home folder" : `its working folder (${workdir})`;
@@ -840,13 +841,77 @@ export function createTools({ vault = null, allowActions, ui, ask, openUrl, onCo
     show: (beats, id, opts) => draw({ beats }, { toolCallId: id }, opts),
   };
 
+  // Roamies' own background browser (browser.mjs): web tasks run there, out of sight, never on the user's screen.
+  function browserTools() {
+    const shot = async () => ({ content: [{ type: 'text', text: "The background browser's page (1280 px wide)." }, { type: 'image', mediaType: 'image/jpeg', data: await browser.screenshot() }] });
+    return [{
+      name: 'browser_open',
+      description: `Open a website in your own background browser, out of sight (${userName}'s screen, mouse and browser stay theirs), and read it: its text and numbered controls for browser_act. Use it for anything you do or look up on a website. site: the address, or the site's name exactly as ${userName} said it ("skool", "the verge", "chess dot com"); a name with no domain goes to the site a web search finds first, so never guess a domain or swap a name for a more common word. Its sign-ins are kept between uses.`,
+      parameters: z.object({ site: z.string().min(1).max(2048) }),
+      execute: async ({ site }) => {
+        const url = openTarget(site);
+        allowed(checkBrowse(url));
+        return browser.open(url);
+      },
+    }, {
+      name: 'browser_read',
+      description: "Read the background browser's page again: its address, text and numbered controls. more: where to carry on in a long text (the number the last read gave).",
+      parameters: z.object({ more: z.number().int().min(0).optional() }),
+      execute: async ({ more = 0 }) => browser.read(more),
+    }, {
+      name: 'browser_act',
+      description: "Work the background browser's page with the control numbers from its last read; steps run in order, so put a whole task in one call (the page is read again at the end). {do:'click', ref} | {do:'type', ref, text, enter} (replaces the field's text; enter: true presses Enter after, to search or send) | {do:'choose', ref, option} (a dropdown) | {do:'key', key} (enter, tab, escape, arrows, pagedown…) | {do:'scroll', direction} | {do:'wait', seconds} | {do:'back'}. Numbers change when the page does: after a click that loads something new, use the numbers in the result.",
+      parameters: z.object({
+        steps: z.preprocess((v) => { const x = unjson(v); return x && typeof x === 'object' && !Array.isArray(x) ? [x] : x; }, z.array(z.object({
+          do: z.enum(['click', 'type', 'choose', 'key', 'scroll', 'wait', 'back']),
+          ref: z.number().int().optional(), text: z.string().optional(), enter: z.boolean().optional(), option: z.string().optional(),
+          key: z.string().optional(), direction: z.enum(['down', 'up', 'left', 'right']).optional(), seconds: z.number().optional(),
+        })).min(1).max(30)),
+      }),
+      executionMode: 'sequential',
+      execute: async ({ steps }, ctx) => {
+        if (!allowActions()) throw new Error(actionsOff);
+        for (const s of steps) if (['click', 'type', 'choose'].includes(s.do) && s.ref == null) throw new Error(`A ${s.do} step needs ref: a control number from browser_read.`);
+        // Delete, pay, send, sign out: asked first, as in act_in_app.
+        const yes = new Set();
+        return browser.act(steps, {
+          beforeClick: async (label) => {
+            if (!isRiskyClick(label)) return true;
+            const kind = riskyKind(label);
+            if (yes.has(kind)) return true;
+            if (!(await confirm(`Click "${label}" on the web page? It could delete, pay, send or sign out.`, ctx))) return false;
+            yes.add(kind);
+            return true;
+          },
+        });
+      },
+    }, {
+      name: 'browser_screenshot',
+      description: "A picture of the background browser's page, only for what its text can't show (images, layout, a chart, a captcha).",
+      parameters: z.object({}), execute: shot,
+    }, {
+      name: 'browser_show',
+      description: `Put the background browser's page on ${userName}'s screen, in a window of its own with the same sign-ins: when they ask to see it, or for a step only they can do (a captcha, a code from their phone, a payment). Afterwards it carries on in that window until they close it.`,
+      parameters: z.object({}),
+      execute: async () => { agentChangesScreen(); return `Showing ${await browser.show()} in a browser window on ${userName}'s screen.`; },
+    }, ...(vault ? [{
+      name: 'browser_login',
+      description: `Sign in on the background browser's page with a saved login (ids from list_logins). Open the site's sign-in page first; it only fills on the exact site the login was saved for, handles username-then-password screens, and sends the form unless submit is false. The password goes straight from the vault into the page, never through you. A code or captcha after it: ask ${userName}, or browser_show.`,
+      parameters: z.object({ id: z.string().max(64), submit: z.boolean().optional() }),
+      execute: async ({ id, submit = true }) => {
+        if (!allowActions()) throw new Error(actionsOff);
+        return vault.login(id, (row, username, password) => browser.login(row, username, password, { submit }));
+      },
+    }] : [])];
+  }
+
   const tools = [
     ...(vault ? [{
       name: 'list_logins', description: 'List saved sites and login ids (usernames stay private; several logins for one site are numbered). To add or change a password, direct the user to the Vault page. Never ask for a password in chat.',
       parameters: z.object({}), execute: async () => JSON.stringify(vault.publicList(await vault.list())),
     }, {
-      name: 'fill_login', description: 'Fill a saved login when requested. The user must focus the username field on the saved site first. Leaves the form for the user to submit.',
-      parameters: z.object({ id: z.string().uuid() }),
+      name: 'fill_login', description: `Fill a saved login into the user's own browser window, only when they ask for it there: they must have the saved site in front with the username field focused, and they submit it. To sign in yourself, use ${browser ? 'browser_login' : 'nothing else'}.`,
+      parameters: z.object({ id: z.string().max(64) }), // no "uuid" format: OpenAI strict schemas reject it; the vault refuses unknown ids
       execute: async ({ id }) => {
         if (!allowActions()) throw new Error(actionsOff);
         return vault.fill(id);
@@ -1063,13 +1128,14 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
     }),
     createWebFetchTool(undefined, { guardUrl: guardFetch }),
     {
-      name: 'open', description: 'Open a website, a file or folder, or an app by name (e.g. "Safari", "https://skool.com", "~/Documents"). Links open in the default browser; set app to open one in a particular browser or app (e.g. app "Safari" when the user says "in Safari").',
-      parameters: z.object({ target: z.string(), app: z.string().optional() }),
-      execute: async ({ target, app }) => {
-        let t = String(target).trim();
-        // A bare web address ("example.com", "www.bbc.co.uk/news") is a link, not an app name: it used to fail as
-        // "Unable to find application named example.com" and cost a retry. App bundles ("Notes.app") stay apps.
-        if (/^(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:[/?#]\S*)?$/i.test(t) && !/\.app$/i.test(t)) t = `https://${t}`;
+      name: 'open', description: `Open something on ${userName}'s screen for them to see: a website, a file or folder, or an app by name (e.g. "Safari", "https://skool.com", "~/Documents"). site instead of target: a website by its name as they said it ("skool", "the verge"), when you don't know its address: it opens the site a search finds first. Links open in the default browser; set app to open one in a particular browser or app (e.g. app "Safari" when the user says "in Safari").${browser ? ' To do something on a website, use browser_open instead.' : ''}`,
+      parameters: z.object({ target: z.string().optional(), site: z.string().optional(), app: z.string().optional() }),
+      execute: async ({ target, site, app }) => {
+        if (!target && !site) throw new Error('Give target (an address, path or app) or site (a website name).');
+        let t = site ? openTarget(site) : String(target).trim();
+        // A bare web address ("example.com", "www.bbc.co.uk/news", "skool dot com") is a link, not an app name: it used
+        // to fail as "Unable to find application named example.com" and cost a retry. App bundles ("Notes.app") stay apps.
+        if (!/^[a-z][a-z0-9+.-]*:/i.test(t) && !/^[~/.\\]/.test(t)) t = siteAddress(t) ?? t;
         // A file:// link is a file on this computer: opened as its path, with the same checks as any path (#159).
         if (/^file:\/\//i.test(t)) { try { t = fileURLToPath(t); } catch { /* not a local file link: checkOpen refuses it */ } }
         const isFile = /^[~/.]/.test(t) && await fs.stat(expand(t)).then((s) => s.isFile() && (s.mode & 0o111) !== 0, () => false);
@@ -1093,6 +1159,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         return `Opened ${t}${inApp.length ? ` in ${app}` : ''}.`;
       },
     },
+    ...(browser ? browserTools() : []),
     {
       name: 'remember_commitment',
       description: `Save what ${userName} commits to doing or asks to be reminded about (never small talk or what you'll do yourself). Saving shows their reminders list on screen by itself, so don't also draw one. kind: 'reminder' only for a plain "remind me to X at/in …" (clears once nudged); 'commitment' (default) for anything they say they'll do ("I'll finish the slides by Friday", "hold me to it"), open until they say it's done. due: "in 90s", "in 5m", "in 1h30m", "in 2 days", or local YYYY-MM-DDTHH:mm[:ss] or YYYY-MM-DD; none if no time. Resolve "Thursday", "at 2" or "tonight" from their message's timestamp. repeat, only when asked again and again: daily, weekdays, weekends, weekly, monthly, yearly, "every N minutes|hours|days|weeks|months" (5 minutes at least) or days like "mon,wed,fri", with due as the first time. A repeating reminder moves on as it fires, a repeating commitment (a habit, like the gym) when marked done. One saved item covers the whole series: never save one per day.`,

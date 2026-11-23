@@ -38,7 +38,7 @@ export function checkFill(address, entry) {
 const SECRET = [
   /(^|\/)\.ssh(\/|$)/, /(^|\/)\.gnupg(\/|$)/, /(^|\/)\.aws(\/|$)/, /(^|\/)\.azure(\/|$)/, /(^|\/)\.kube\/config$/,
   /(^|\/)\.docker\/config\.json$/, /(^|\/)\.netrc$/, /(^|\/)\.npmrc$/, /(^|\/)\.pypirc$/, /(^|\/)\.git-credentials$/,
-  /(^|\/)\.config\/gh(\/|$)/, /(^|\/)\.config\/gcloud(\/|$)/, /(^|\/)\.gg\/auth\.json$/, /(^|\/)Roamies\/Data\/(?:secrets\.json|vault\.json(?:\.[\w-]+\.tmp)?)$/i, /(^|\/)\.tauri(\/|$)/,
+  /(^|\/)\.config\/gh(\/|$)/, /(^|\/)\.config\/gcloud(\/|$)/, /(^|\/)\.gg\/auth\.json$/, /(^|\/)Roamies\/Data\/(?:secrets\.json|vault\.json(?:\.[\w-]+\.tmp)?)$/i, /(^|\/)Roamies\/Data\/browser(\/|$)/i, /(^|\/)\.tauri(\/|$)/,
   /(^|\/)Library\/Keychains(\/|$)/, /(^|\/)Library\/Cookies(\/|$)/, /\/(Cookies|Login Data|Web Data)(-journal)?$/,
   /(^|\/)\.env(\.[\w-]+)?$/, /\.(pem|p12|pfx|key|keystore|jks)$/i, /(^|\/)id_(rsa|ed25519|ecdsa|dsa)(\.pub)?$/,
   /(^|\/)\.(bash|zsh|fish)_history$/, /(^|\/)\.zsh_sessions(\/|$)/,
@@ -498,6 +498,16 @@ export function checkLink(url) {
   try { u = new URL(String(url)); } catch { return verdict(BLOCK, "That isn't a valid link."); }
   if (u.protocol === 'mailto:') return verdict(SAFE);
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return verdict(BLOCK, 'Only web and email links open from a reply.');
+  if (u.username || u.password) return verdict(BLOCK, 'Links with passwords in them are blocked.');
+  return verdict(SAFE);
+}
+
+/** The background browser (browser.mjs): web pages only, never files, scripts or the browser's own pages, nor links
+ *  with passwords in them. Pages on this computer stay allowed, as in the user's own browser (a dev server). */
+export function checkBrowse(url) {
+  let u;
+  try { u = new URL(String(url)); } catch { return verdict(BLOCK, "That isn't a valid web address."); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return verdict(BLOCK, 'The background browser only opens http and https pages.');
   if (u.username || u.password) return verdict(BLOCK, 'Links with passwords in them are blocked.');
   return verdict(SAFE);
 }

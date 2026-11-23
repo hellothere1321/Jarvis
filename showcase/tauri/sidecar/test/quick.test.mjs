@@ -98,7 +98,7 @@ for (const t of ['show my list', "what's on my list", 'what is on my to-do list'
 const op = (t) => { const g = m(t); return g?.kind === 'open' ? g.args : null; };
 for (const [t, type, target] of [
   ['open spotify', 'app', 'spotify'], ['Open Spotify please', 'app', 'Spotify'], ['can you open visual studio code', 'app', 'visual studio code'], ['launch discord', 'app', 'discord'], ['fire up steam', 'app', 'steam'],
-  ['open the calculator', 'app', 'calculator'], ['open youtube.com', 'url', 'https://youtube.com'], ['open youtube', 'url', 'https://www.youtube.com'], ['go to github.com', 'url', 'https://github.com'],
+  ['open the calculator', 'app', 'calculator'], ['open youtube.com', 'url', 'https://youtube.com'], ['open skool dot com', 'url', 'https://skool.com/'], ['go to you tube dot com slash shorts', 'url', 'https://youtube.com/shorts'], ['open w w w dot bbc dot co dot uk', 'url', 'https://www.bbc.co.uk/'], ['open youtube', 'url', 'https://www.youtube.com'], ['go to github.com', 'url', 'https://github.com'],
   ['open https://example.com/docs', 'url', 'https://example.com/docs'], ['open www.bbc.co.uk/news', 'url', 'https://www.bbc.co.uk/news'], ['open gmail', 'url', 'https://mail.google.com'],
   ['open my downloads folder', 'path', path.join(HOME, 'Downloads')], ['open the documents folder', 'path', path.join(HOME, 'Documents')], ['open downloads', 'path', path.join(HOME, 'Downloads')],
   ['open my desktop folder', 'path', path.join(HOME, 'Desktop')], ['open ~/Notes', 'path', '~/Notes'],
