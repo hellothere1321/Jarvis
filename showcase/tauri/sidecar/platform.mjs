@@ -87,6 +87,9 @@ export const hasHands = (platform, hands) => platform === 'darwin' || !!hands;
  *  Linux has no hands helper yet, so none of the three below. */
 export const canSnap = (platform, hands) => platform === 'darwin' || (platform === 'win32' && !!hands);
 
+/** Game mode's test on Windows: a browser or video player filling the screen is a fullscreen video, not a game. */
+export const mayBeGame = (app) => !/firefox|chrome|msedge|edge|brave|opera|vivaldi|\barc\b|vlc|mpc-|media player|movies|potplayer|mpv|netflix|youtube/i.test(String(app ?? ''));
+
 /** Circling something while holding the talk keys: the voice helper draws it, on macOS and Windows. */
 export const canCircle = (platform) => platform === 'darwin' || platform === 'win32';
 

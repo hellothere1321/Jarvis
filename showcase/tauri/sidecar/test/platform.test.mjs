@@ -116,3 +116,8 @@ assert.equal(writeChord('win32', TALK, 'off'), null);
   assert.equal(talkChords('darwin').length, 5);
   for (const p of ['win32', 'linux']) assert.ok(talkChords(p).every((c) => !c.includes('command')), `${p}: no Win/Super key`);
 }
+{
+  const { mayBeGame } = await import('../platform.mjs');
+  for (const app of ['Firefox', 'firefox.exe', 'Google Chrome', 'msedge', 'VLC media player', 'Media Player']) assert.ok(!mayBeGame(app), `${app} is a video, not a game`);
+  for (const app of ['javaw', 'Minecraft', 'eldenring', 'RobloxPlayerBeta', 'World of Warcraft', '']) assert.ok(mayBeGame(app), `${app} may be a game`);
+}

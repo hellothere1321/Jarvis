@@ -12,7 +12,7 @@ import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, sho
 import { ASK, BLOCK, checkBrowse, checkDrawAction, checkFetch, checkOpen, checkRead, checkWrite, classifyCommand, isRiskyClick, isYes, riskyKind } from './safety.mjs';
 import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, createParts, createPhotos, describeParts, faviconFor, pickTextMatch, quizNote, readSecs, resolveTargets, unjson } from './draw.mjs';
 import { plain } from './intro.mjs';
-import { linuxSession, seesPointer } from './platform.mjs';
+import { linuxSession, mayBeGame, seesPointer } from './platform.mjs';
 import { openTarget, siteAddress } from './browser.mjs';
 import { addCommitment, forgetFact, getCommitment, parseDue, parseRepeat, repeatLabel, updateCommitment } from './store.mjs';
 import * as planner from './planner.mjs';
@@ -1506,6 +1506,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
     if (!HANDS) return null;
     const r = await Promise.race([hands('locate', 'front').catch(() => null), new Promise((res) => setTimeout(() => res(null), 1500))]);
     const b = r?.window?.bounds;
+    if (!mayBeGame(r?.window?.app)) return null;
     return Array.isArray(b) && b.length === 4 && b.every(Number.isFinite) ? b : null;
   }
   return { tools, hands, whereNow, frontNow, frontBounds, ink: inkEvents, nextTurn: () => ++turn };
