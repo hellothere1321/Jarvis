@@ -146,6 +146,18 @@ export function edit(id, values) {
   });
 }
 
+/** Adds minutes a focus block spent on a task to its local `spent` field, queued with the other writes. */
+export function addSpent(id, minutes, now = Date.now()) {
+  const n = Math.max(0, Math.round(Number(minutes) || 0));
+  if (!n) return get(id);
+  return change((items) => {
+    const item = items.find((candidate) => candidate.id === id && live(candidate) && candidate.kind === 'task');
+    if (!item) return null;
+    item.spent = (Number(item.spent) || 0) + n;
+    return touched(item, now);
+  });
+}
+
 export function advanceCompletedTask(item, now) {
   const rule = parseRule(item.repeat);
   if (!rule || item.start == null) return false;

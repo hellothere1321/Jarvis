@@ -15,6 +15,7 @@ import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
 import { addCommitment, forgetFact, getCommitment, parseDue, parseRepeat, repeatLabel, updateCommitment } from './store.mjs';
 import * as planner from './planner.mjs';
+import * as timelog from './timelog.mjs';
 import { addDays, midnight, parseWhen } from './when.mjs';
 import { snoozeTarget, snoozeUntil } from './snooze.mjs';
 import { addJob, getJob, jobsText, removeJob, updateJob } from './jobs.mjs';
@@ -320,7 +321,7 @@ function plannerFound(item, id) {
   return item;
 }
 
-export const PLANNER_TOOLS = new Set(['add_task', 'add_event', 'update_planner_item', 'complete_task', 'delete_planner_item', 'list_planner']);
+export const PLANNER_TOOLS = new Set(['add_task', 'add_event', 'update_planner_item', 'complete_task', 'delete_planner_item', 'list_planner', 'time_log']);
 
 export function createTools({ allowActions, ui, ask, openUrl, onCommitments, onPlanner = () => {}, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', skipAllow = () => false, jobs = null, skills = null }) {
   // Relative paths (and run_command) start in workdir: ~/Roamies for the chat, its own folder for an agent.
@@ -1202,6 +1203,21 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       },
     },
     {
+      name: 'time_log',
+      description: `Read how long ${userName} spent in focus blocks, for "how long did I work on X this week". from and to are local dates or words like Monday; with neither, this week's blocks are totalled. Read-only: it never changes the log.`,
+      parameters: z.object({ from: plannerWhen.optional(), to: plannerWhen.optional() }),
+      execute: async ({ from, to }) => {
+        const now = Date.now();
+        const d = new Date(now), monday = midnight(new Date(d.getFullYear(), d.getMonth(), d.getDate() - (d.getDay() + 6) % 7).getTime());
+        const first = from === undefined ? monday : midnight(plannerDate(from, now).start);
+        const last = to === undefined ? now + 86_400_000 : midnight(plannerDate(to, now).start);
+        if (last <= first) throw new Error('The last day must be on or after the first day.');
+        const t = timelog.totals({ from: first, to: last });
+        if (!t.total) return `No focus time logged from ${fmtWhen(first)} to ${fmtWhen(last)}.`;
+        return [`Focus time: ${t.total} minutes total.`, ...t.byItem.map((x) => `- ${x.title}${x.itemId ? ` (${x.itemId})` : ''}: ${x.minutes} min`)].join('\n');
+      },
+    },
+    {
       name: 'forget_fact', description: 'Delete a saved fact that is wrong or that the user asks you to forget. Ids are in the memory section of the <live-state> block.',
       parameters: z.object({ id: z.string() }),
       execute: async ({ id }) => { const f = await forgetFact(id); if (!f) throw new Error(`No fact with id ${id}.`); return `Forgot: ${f.text}`; },
@@ -1330,9 +1346,9 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
     }] : []),
     ...(focus ? [{
       name: 'start_focus',
-      description: `Start a focus block when ${userName} wants to focus ("focus for 45 minutes", "help me stay on task"). While it runs you check the front window every 20 seconds and get a note when they stay on a distraction from their list, so you can nudge them back. minutes: 5 to 240 (25 by default). task: what they're working on, if said. A new block replaces a running one.`,
-      parameters: z.object({ minutes: z.number().optional(), task: z.string().max(120).optional() }),
-      execute: async ({ minutes, task }) => focus.start(minutes, task),
+      description: `Start a focus block when ${userName} wants to focus ("focus for 45 minutes", "help me stay on task"). While it runs you check the front window every 20 seconds and get a note when they stay on a distraction from their list, so you can nudge them back. minutes: 5 to 240 (25 by default). task: what they're working on, if said. itemId: the optional planner task id to credit the time to (id is accepted too). A new block replaces a running one.`,
+      parameters: z.object({ minutes: z.number().optional(), task: z.string().max(120).optional(), itemId: z.string().max(120).optional(), id: z.string().max(120).optional() }),
+      execute: async ({ minutes, task, itemId, id }) => focus.start(minutes, task, itemId || id || ''),
     }, {
       name: 'stop_focus',
       description: 'End the running focus block early, when they say they\'re done or want to stop.',

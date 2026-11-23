@@ -33,7 +33,9 @@ import { createGoogleSync } from './googlesync.mjs';
 import { act as plannerAct, clampWeek, plannerStamp, plannerView, preview as plannerPreview } from './plannerview.mjs';
 import { feedbackOf, foldInput, rateTarget, foldPrompt, lessonInput, lessonPrompt, memoryInput, memoryPrompt, oneShot, parseBrain, parseLesson, parseSkill, shouldLearn, skillInput, skillPrompt, soundsWrong, transcript } from './brain.mjs';
 import { briefNote } from './brief.mjs';
-import { CHECK_MS, DEFAULT_DISTRACTIONS, check as focusCheck, parseDistractions, startBlock } from './focus.mjs';
+import { CHECK_MS, DEFAULT_DISTRACTIONS, check as focusCheck, endBlock, parseDistractions, startBlock } from './focus.mjs';
+import { DEFAULT_QUIET, isQuiet, timeMinutes } from './quiet.mjs';
+import { append as appendTimeLog } from './timelog.mjs';
 import { saveCardImage } from './cardimage.mjs';
 import { cleanWakeName, wakeName } from './wakename.mjs';
 import { KEY_NAME as SYNC_KEY, MIN_PASSPHRASE, checkFolder, folderReady, merge as syncMerge, newDevice, prepareFolder, readRemotes, suggestFolders, tooMuchGone, writeOwn } from './sync.mjs';
@@ -138,6 +140,7 @@ const DEFAULTS = {
   notch: 'off', // where I appear: 'off' (beside the cursor, default), 'drop' (the capsule) or 'spread' (a Mac's notch; see notchMode)
   onboarded: false, onboardStep: 0, filesAsked: false, keys: DEFAULT_KEYS, muteWhileTalking: true, volume: 100, autoListen: false, listenEvery: false, listenSecs: 8, lite: false, wakeWord: false, setupVersion: 0, size: 'default', look: 'classic', introDone: false,
   replies: 'text', // 'voice': spoken (with Fish Audio or Gemini) as well as shown
+  quietHours: { ...DEFAULT_QUIET }, // nightly window: reminders still show, but nothing is spoken or nudged
   speechLang: 'auto', // the language talking is recognised in (macOS): 'auto' follows the Mac's language list, or a locale like 'ar-SA'
   tts: 'fish', // which one speaks: 'fish' (Fish Audio), 'gemini' or 'voicestudio' (the VoiceStudio app on this computer)
   studioSpeak: 'short', // how much VoiceStudio says out loud: 'short', 'medium' or 'full' (it renders slower than real time)
@@ -221,6 +224,8 @@ let routed = null, defaultPick = null;
 let turnWords = ''; // what they said this turn, verbatim: attached to every handoff (route, agents)
 const savedConfig = () => ({ ...config, ...userDefault(config, routed, defaultPick) });
 const saveConfig = () => writeJson(CONFIG_PATH, savedConfig(), { backup: true });
+const quietHours = () => config.quietHours ?? DEFAULT_QUIET;
+const quietNow = (date = new Date()) => isQuiet(date, quietHours());
 
 // ---------- spoken replies (Fish Audio, Gemini or VoiceStudio) ----------
 // The key is the user's own: in the Keychain (macOS), DPAPI-encrypted (Windows) or the desktop's keyring (Linux),
@@ -679,7 +684,7 @@ const meetingToolNames = new Set(localMeetingTools.map((t) => t.name));
 let turnVoice = null;
 const commitmentsChanged = (c) => { menu(); scheduleReminders(); showList({ flash: c?.id, seconds: 6 }); syncSoon(); };
 const { tools, hands, whereNow, frontNow: frontData, frontBounds, ink, nextTurn } = createTools({
-  focus: HANDS_OK ? { start: (m, t) => startFocus(m, t), stop: () => stopFocus() } : null,
+  focus: HANDS_OK ? { start: (m, t, id) => startFocus(m, t, id), stop: () => stopFocus() } : null,
   firedReminders: () => firedReminders,
   allowActions: () => config.allowActions, skipAllow: () => !!config.allowActions && !!config.skipAllow, ui, ask, openUrl, userName,
   speak: (line) => { if (!turnVoice) return false; turnVoice.say(line); return true; },
@@ -1048,10 +1053,10 @@ let credsBaseUrl;
 
 // One run at a time: a new request waits for (or interrupts) the current one. Folding waits until none is left.
 let queued = 0;
-function enqueue(text, { interrupt = false, image = null, note = '', byVoice = false, listenAfter = false, news = null } = {}) {
+function enqueue(text, { interrupt = false, image = null, note = '', byVoice = false, listenAfter = false, news = null, silent = false } = {}) {
   if (interrupt && busy) interruptQuietly('new request');
   queued++;
-  running = running.then(() => prompt(text, image, note, byVoice, news, listenAfter)).catch((e) => console.error('prompt', e))
+  running = running.then(() => prompt(text, image, note, byVoice, news, listenAfter, silent)).catch((e) => console.error('prompt', e))
     .finally(() => { if (--queued === 0) maybeCompact(); });
   return running;
 }
@@ -1476,7 +1481,7 @@ const desk = newsDesk({
 const stir = desk.stir;
 // news: the agent ids this system turn passes on.
 const snoozeListenOn = () => VOICE_OK && !!config.voice && !!config.snoozeListen && voiceReady() && !intro;
-async function prompt(text, image = null, note = '', byVoice = false, news = null, listenAfter = false) {
+async function prompt(text, image = null, note = '', byVoice = false, news = null, listenAfter = false, silent = false) {
   // What they said, word for word, for the handoffs below (a heavy model, a background agent). System lines aren't theirs.
   turnWords = news || intro || String(text).startsWith('(') ? '' : String(text);
   // The time, a sum, a timer, "open Spotify": answered on this PC with no model call (quick.mjs).
@@ -1506,7 +1511,8 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
   let hatching = agentish;
   const hatchOff = () => { if (hatching) { hatching = false; ui({ kind: 'agents', e: { type: 'hatch_off' } }); } };
   // Voice: the socket opens now, while the model thinks; sentences are spoken as soon as each is ready.
-  const voice = VOICE_ON() ? speech.start() : (speech.stop(), null);
+  // Quiet-hour alerts still run through this path so they show as text, but get no voice.
+  const voice = !silent && VOICE_ON() ? speech.start() : (speech.stop(), null);
   turnVoice = voice;
   if (voice && intro) guideVoices.add(voice.id);
   const spoken = voice && new SpeechText((t) => voice.say(t), speech.localOpts?.());
@@ -2106,22 +2112,28 @@ function focusLine() {
   const left = Math.max(0, Math.round((focusBlock.until - Date.now()) / 60_000));
   return `- Focus block running${focusBlock.task ? ` (on: ${focusBlock.task})` : ''}: ${left} min left, until ${new Date(focusBlock.until).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}; drifted ${focusBlock.drifts} time${focusBlock.drifts === 1 ? '' : 's'} so far. Help them stay on it.\n`;
 }
-function startFocus(minutes, task) {
-  focusBlock = startBlock(minutes, task);
+function startFocus(minutes, task, itemId = '') {
+  focusBlock = startBlock(minutes, task, Date.now(), itemId);
   clearInterval(focusTimer);
   focusTimer = setInterval(() => focusTick().catch((e) => console.error('focus', e)), CHECK_MS);
-  logLine('focus', { start: focusBlock.minutes });
+  logLine('focus', { start: focusBlock.minutes, itemId: focusBlock.itemId || null });
   agentStale = true; menu();
   return `Focus block started: ${focusBlock.minutes} minutes, until ${fmtWhen(focusBlock.until)}. I'll check in if they drift to: ${distractionList().slice(0, 8).join(', ')}${distractionList().length > 8 ? ' and more' : ''}.`;
 }
-function stopFocus(byPanel = false) {
+async function stopFocus(byPanel = false) {
   if (!focusBlock) return 'No focus block is running.';
   const b = focusBlock;
   focusBlock = null; clearInterval(focusTimer); focusTimer = null;
-  logLine('focus', { stop: Math.round((Date.now() - b.startedAt) / 60_000), drifts: b.drifts });
+  const entry = endBlock(b);
+  // Every ending is logged; only a block tied to a planner task adds to that task's spent time.
+  try {
+    await appendTimeLog(entry);
+    if (entry.itemId && entry.minutes > 0) await planner.addSpent(entry.itemId, entry.minutes, entry.end);
+  } catch (e) { console.error('focus log', e); }
+  logLine('focus', { stop: entry.minutes, drifts: b.drifts, itemId: entry.itemId });
   agentStale = true; menu();
   if (byPanel) say('Focus block ended. Nice work.', 'happy');
-  return `Focus block ended after ${Math.round((Date.now() - b.startedAt) / 60_000)} minutes, with ${b.drifts} drift${b.drifts === 1 ? '' : 's'}.`;
+  return `Focus block ended after ${entry.minutes} minutes, with ${b.drifts} drift${b.drifts === 1 ? '' : 's'}.`;
 }
 async function focusTick() {
   const b = focusBlock;
@@ -2131,16 +2143,28 @@ async function focusTick() {
   const r = focusCheck(b, front, distractionList());
   if (r.end) {
     const drifts = b.drifts;
-    stopFocus();
+    await stopFocus();
     if (!busy && !onboarding) enqueue(`(System, not ${userName}: their ${b.minutes}-minute focus block${b.task ? ` on ${b.task}` : ''} just ended, with ${drifts} drift${drifts === 1 ? '' : 's'}. Tell them in one or two sentences, in character, celebrating it. Start with the [happy] tag.)`);
     return;
   }
-  // A nudge waits while a conversation is going on; the next look decides again.
-  if (r.nudge && !busy && !onboarding && !loggingIn) {
+  // A nudge waits while a conversation is going on and through quiet hours; the next look decides again.
+  if (r.nudge && !quietNow() && !busy && !onboarding && !loggingIn) {
     logLine('focus', { nudge: true });
     const left = Math.max(1, Math.round((b.until - Date.now()) / 60_000));
     enqueue(`(System, not ${userName}: they're in a focus block${b.task ? ` on ${b.task}` : ''} with ${left} min left, but have been on ${r.nudge} for a bit. Nudge them back playfully in one short sentence, in character: teasing, never scolding. Start with the [remind] tag.)`);
   } else if (r.nudge) b.nudgedAt = 0;
+}
+// The panel's "Focus a task" link: pick an open planner task by id, then time it against that task.
+async function startFocusFromPanel() {
+  const tasks = planner.list({ kind: 'task' }).slice(0, 24);
+  if (!tasks.length) { panelNote('No open planner tasks yet. Add one, or just say “focus for 25 minutes”.', true); return; }
+  const lines = tasks.slice(0, 8).map((t) => `${t.id} · ${t.title}`);
+  const typed = await ask({ prompt: `Which planner task? Paste its id:\n${lines.join('\n')}`, placeholder: lines[0] });
+  if (typed == null) return;
+  const id = String(typed).trim().split(/\s*[·|]\s*/)[0];
+  const task = tasks.find((t) => t.id === id) ?? planner.get(id);
+  if (!task || task.kind !== 'task') { panelNote('That id isn’t one of your open planner tasks.', true); return; }
+  say(startFocus(25, task.title, task.id), 'happy');
 }
 // ---------- memory sync (sync.mjs) ----------
 // With a sync folder set: a pass every minute, and a few seconds after a change here. A pass merges the other
@@ -2450,7 +2474,7 @@ function panelState() {
       mics: mics.list, mic: config.mic ?? '', micAuto: mics.list.find((x) => x.id === mics.auto)?.name ?? '',
       download: NEEDS_MODEL && config.voice && !voiceReady() ? speechModelDownload() : null,
     } : null,
-    sound: !!config.sound, volume: volumeNow(), actions: !!config.allowActions, skipAllow: !!config.skipAllow, lite: !!config.lite, hybrid: { on: !!config.hybrid, jobs: JOB_KINDS.map((j) => ({ ...j, value: parseSpec(config.heavy?.[j.kind])?.spec ?? '' })), active: routed?.spec ?? '' }, subagents: { on: !!config.subagents, delegate: DELEGATE_MODES.includes(config.delegate) ? config.delegate : 'ask', crew: SUBAGENTS.map((s) => { const c = activeCrew(config.crew, crewSpec, hybridActive() ? config.heavy : null).find((x) => x.id === s.id); return { id: s.id, label: s.label, hint: s.hint, value: parseSpec(config.crew?.[s.id])?.spec ?? '', via: c?.via ?? '', uses: c?.spec.spec ?? '' }; }) }, efforts: Object.fromEntries(SLOTS.map((k) => [k, config.efforts?.[k] ?? ''])), fallbacks: { on: !!config.backups, slots: [0, 1].map((i) => parseSpec(config.fallbacks?.[i])?.spec ?? ''), limited: limits.list().filter((l) => !l.key.includes(':') && (isQuota(l.kind) || l.kind === 'busy')).map((l) => ({ label: PROVIDER_LABELS[l.key] ?? l.key, until: l.until })), unavailable: limits.list().filter((l) => !(isQuota(l.kind) || l.kind === 'busy')).map((l) => ({ label: PROVIDER_LABELS[l.key] ?? modelName(l.key.split(':').slice(1).join(':')) ?? l.key, why: becauseOf(l.kind), until: l.until })), using: routed && /^backup/.test(routed.slot ?? '') ? routed.spec : '' }, notch: notchMode(), notchReal: notchScreen, brief: { on: !!config.morningBrief, todoist: !!config.briefTodoist, canTodoist: HANDS_OK }, focus: HANDS_OK ? { until: focusBlock?.until ?? null, task: focusBlock?.task ?? '', list: distractionList(), custom: !!config.distractions } : null, sync: { dir: config.syncDir || '', at: syncInfo.at, error: syncInfo.error, paused: !!syncInfo.paused }, gameMode: HANDS_OK ? config.gameSidebar !== false : null,
+    sound: !!config.sound, volume: volumeNow(), actions: !!config.allowActions, skipAllow: !!config.skipAllow, lite: !!config.lite, hybrid: { on: !!config.hybrid, jobs: JOB_KINDS.map((j) => ({ ...j, value: parseSpec(config.heavy?.[j.kind])?.spec ?? '' })), active: routed?.spec ?? '' }, subagents: { on: !!config.subagents, delegate: DELEGATE_MODES.includes(config.delegate) ? config.delegate : 'ask', crew: SUBAGENTS.map((s) => { const c = activeCrew(config.crew, crewSpec, hybridActive() ? config.heavy : null).find((x) => x.id === s.id); return { id: s.id, label: s.label, hint: s.hint, value: parseSpec(config.crew?.[s.id])?.spec ?? '', via: c?.via ?? '', uses: c?.spec.spec ?? '' }; }) }, efforts: Object.fromEntries(SLOTS.map((k) => [k, config.efforts?.[k] ?? ''])), fallbacks: { on: !!config.backups, slots: [0, 1].map((i) => parseSpec(config.fallbacks?.[i])?.spec ?? ''), limited: limits.list().filter((l) => !l.key.includes(':') && (isQuota(l.kind) || l.kind === 'busy')).map((l) => ({ label: PROVIDER_LABELS[l.key] ?? l.key, until: l.until })), unavailable: limits.list().filter((l) => !(isQuota(l.kind) || l.kind === 'busy')).map((l) => ({ label: PROVIDER_LABELS[l.key] ?? modelName(l.key.split(':').slice(1).join(':')) ?? l.key, why: becauseOf(l.kind), until: l.until })), using: routed && /^backup/.test(routed.slot ?? '') ? routed.spec : '' }, notch: notchMode(), notchReal: notchScreen, brief: { on: !!config.morningBrief, todoist: !!config.briefTodoist, canTodoist: HANDS_OK }, focus: HANDS_OK ? { until: focusBlock?.until ?? null, task: focusBlock?.task ?? '', itemId: focusBlock?.itemId ?? '', list: distractionList(), custom: !!config.distractions } : null, quiet: { ...quietHours() }, sync: { dir: config.syncDir || '', at: syncInfo.at, error: syncInfo.error, paused: !!syncInfo.paused }, gameMode: HANDS_OK ? config.gameSidebar !== false : null,
     login: login.supported ? { on: login.on } : null,
     update: { available: update.available, installing: update.installing, checking: update.checking, result: update.result, page: update.page, done: update.done },
     intro: !!intro,
@@ -2757,7 +2781,16 @@ async function onMenu(id, via) {
   else if (id === 'learnskills') { config.learnSkills = config.learnSkills === false; saveConfig(); if (!config.learnSkills) dropLearn(); menu(); }
   else if (id === 'morningbrief') { config.morningBrief = !config.morningBrief; saveConfig(); menu(); }
   else if (id === 'brieftodoist' && HANDS_OK) { config.briefTodoist = !config.briefTodoist; saveConfig(); menu(); }
-  else if (id === 'focusstop') stopFocus(true);
+  else if (id === 'focusstop') await stopFocus(true);
+  else if (id === 'focusstart' && HANDS_OK) await startFocusFromPanel();
+  else if (id === 'quieton') {
+    config.quietHours = { ...quietHours(), on: !quietHours().on }; saveConfig(); menu(); panel();
+  }
+  else if (/^quiet(start|end):/.test(id)) {
+    const [, field, value] = id.match(/^quiet(start|end):(.+)$/s);
+    if (timeMinutes(value) == null) { panelNote('Use a 24-hour time like 23:30.', true); return panel(); }
+    config.quietHours = { ...quietHours(), [field]: value }; saveConfig(); panel();
+  }
   else if (id === 'distractions' && HANDS_OK) {
     const typed = await ask({ prompt: 'What distracts you? Sites or apps, separated by commas (empty for my usual list).', placeholder: distractionList().join(', ') });
     if (typed == null) return;
@@ -3168,6 +3201,7 @@ async function remindTick() {
   const due = await takeDueReminders(now);
   const events = await planner.takeDueAlerts(now).catch((e) => { console.error('planner alerts', e); return []; });
   if (!due.length && !events.length) return;
+  const silent = quietNow();
   const firedAt = Date.now();
   firedReminders = [...firedReminders.filter((f) => firedAt - f.at < 3600_000), ...due.map((c) => ({ id: c.id, at: firedAt }))].slice(-20);
   menu(); showList({ flash: due[0]?.id, seconds: 6 });
@@ -3178,7 +3212,7 @@ async function remindTick() {
     const prompt = calendar
       ? `(System, not ${userName}: nudge ${userName} about these alerts in one or two sentences, in character. Start with the [remind] tag.${snooze})\n${list}\nCalendar alerts:\n${calendar}`
       : `(System, not ${userName}: these commitments are due now. Nudge ${userName} about them in one or two sentences, in character. Start with the [remind] tag, or [upset] if it's well overdue. If they answer "snooze", "in 10 minutes" or "move it to tomorrow", use snooze_reminder.)\n${list}`;
-    enqueue(prompt, { listenAfter: due.length > 0 && snoozeListenOn() });
+    enqueue(prompt, { listenAfter: due.length > 0 && snoozeListenOn() && !silent, silent });
   } else {
     ui({ kind: 'agent', e: { type: 'emote', action: 'remind' } });
     const fallback = [...(due.length ? [`Reminder: ${due[0].text}`] : []), ...events.map((event) => `${event.title} at ${fmtWhen(event.start)}`)];

@@ -7,8 +7,8 @@ export const MIN_MINUTES = 5, MAX_MINUTES = 240;
 
 // Sites by address; apps and pages by name (in the app's name or the window title).
 export const DEFAULT_DISTRACTIONS = ['youtube.com', 'YouTube', 'reddit.com', 'x.com', 'twitter.com', 'tiktok.com', 'instagram.com',
-  'facebook.com', 'netflix.com', 'Netflix', 'twitch.tv', 'Twitch', 'Steam', 'Epic Games', 'Roblox', 'Minecraft', 'League of Legends',
-  'Fortnite', 'Valorant', 'Counter-Strike', 'Battle.net', 'disneyplus.com', 'primevideo.com', '9gag.com'];
+  'facebook.com', 'netflix.com', 'Netflix', 'twitch.tv', 'Twitch', 'Discord', 'discord.com', 'Steam', 'Epic Games', 'Roblox', 'Minecraft',
+  'League of Legends', 'Fortnite', 'Valorant', 'Counter-Strike', 'Battle.net', 'disneyplus.com', 'primevideo.com', '9gag.com'];
 
 /** A list typed by the user ("youtube.com, Steam, chess.com") → clean entries; empty → the defaults. */
 export function parseDistractions(text) {
@@ -40,10 +40,21 @@ export function distraction(front, list = DEFAULT_DISTRACTIONS) {
   return null;
 }
 
-/** A new block. minutes is clamped; task is what they're focusing on (optional). */
-export function startBlock(minutes, task = '', now = Date.now()) {
+/** A new block. minutes is clamped; task is what they're focusing on, itemId the planner task it belongs to (both optional). */
+export function startBlock(minutes, task = '', now = Date.now(), itemId = '') {
   const m = Math.round(Math.min(MAX_MINUTES, Math.max(MIN_MINUTES, Number(minutes) || 25)));
-  return { startedAt: now, until: now + m * 60_000, minutes: m, task: String(task ?? '').trim().slice(0, 120), streak: 0, drifts: 0, nudgedAt: 0, on: null };
+  return { startedAt: now, until: now + m * 60_000, minutes: m, task: String(task ?? '').trim().slice(0, 120), itemId: String(itemId ?? '').trim().slice(0, 120), streak: 0, drifts: 0, nudgedAt: 0, on: null };
+}
+
+/** Whole minutes actually spent: rounded, but any time at all counts as at least one minute. */
+export function focusedMinutes(block, now = Date.now()) {
+  const ms = now - block.startedAt;
+  return ms > 0 ? Math.max(1, Math.round(ms / 60_000)) : 0;
+}
+
+/** What gets logged when a block ends, early or on time. */
+export function endBlock(block, now = Date.now()) {
+  return { itemId: block.itemId || null, title: block.task || '', start: block.startedAt, end: now, minutes: focusedMinutes(block, now) };
 }
 
 /**
