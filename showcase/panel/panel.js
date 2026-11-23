@@ -1179,7 +1179,7 @@
   // Today, Upcoming, Lists and Week, drawn from the sidecar's planner view (plannerview.mjs). The sidecar understands
   // the quick-add line (the preview under it is its answer) and does every change; the edit form is one block above
   // the views, filled from a draft kept here so a redraw never loses what was typed.
-  const pl = { view: 'today', text: '', kind: 'auto', shown: null, edit: null, draft: null, series: false, t: 0, sx: null };
+  const pl = { view: 'today', text: '', kind: 'auto', shown: null, edit: null, draft: null, series: false, t: 0, sx: null, cap: '', when: {}, feedName: '', feedUrl: '' };
   const PRIORITY = ['', 'low', 'medium', 'high'];
   const plSend = (op, data = {}) => send({ type: 'planner', op, data });
   const plDay = (t) => new Date(t).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
@@ -1208,14 +1208,14 @@
   function plRow(r, { date = false, now = 0, inList = false } = {}) {
     const meta = plMeta(r, date, inList);
     return el('li', { className: `item pl${pl.edit === r.itemId ? ' open' : ''}${r.done ? ' done' : ''}${r.kind === 'event' && r.end <= now ? ' past' : ''}` },
-      r.kind === 'task' ? plTick(r) : el('span', { className: 'mark', 'aria-hidden': 'true' }),
+      r.kind === 'task' && !r.readOnly ? plTick(r) : el('span', { className: 'mark', 'aria-hidden': 'true' }),
       el('span', { className: 'text', dir: 'auto' },
-        el('button', { className: 'pl-title', type: 'button', textContent: r.title, title: r.title, 'data-k': `pl:edit:${r.id}`, 'aria-label': `Edit ${r.title}`, on: { click: () => plEdit(r) } }),
+        r.readOnly ? el('span', { className: 'pl-title', textContent: r.title, title: r.title }) : el('button', { className: 'pl-title', type: 'button', textContent: r.title, title: r.title, 'data-k': `pl:edit:${r.id}`, 'aria-label': `Edit ${r.title}`, on: { click: () => plEdit(r) } }),
         meta ? el('small', { className: r.overdue ? 'late' : '', textContent: meta, title: meta }) : null),
       el('span', { className: 'row-btns icons' },
-        r.series && r.kind === 'event' ? link('Skip', () => plSend('skip', { id: r.itemId, start: r.start, allDay: r.allDay }), { k: `pl:skip:${r.id}`, aria: `Skip ${r.title} on ${plDay(r.start)}` }) : null,
+        r.series && r.kind === 'event' && !r.readOnly ? link('Skip', () => plSend('skip', { id: r.itemId, start: r.start, allDay: r.allDay }), { k: `pl:skip:${r.id}`, aria: `Skip ${r.title} on ${plDay(r.start)}` }) : null,
         r.link ? link('Link', () => plSend('open', { id: r.itemId }), { k: `pl:link:${r.id}`, aria: `Open the link for ${r.title}` }) : null,
-        iconArmed('x', 'Delete', `pl:del:${r.id}`, `planner:remove:${r.itemId}`, `Delete ${r.title}${r.series ? ' and all its repeats' : ''}`)));
+        r.readOnly ? null : iconArmed('x', 'Delete', `pl:del:${r.id}`, `planner:remove:${r.itemId}`, `Delete ${r.title}${r.series ? ' and all its repeats' : ''}`)));
   }
   const plList = (rows, opts, label) => el('ul', { className: 'list', 'aria-label': label }, rows.map((r) => plRow(r, opts)));
 
@@ -1322,21 +1322,62 @@
       plScroll(el('div', { className: 'pl-week', role: 'group', 'aria-label': 'Week' }, w.days.map((d) => el('section', { className: `pl-col${d.today ? ' today' : ''}`, 'aria-label': plDay(d.day) },
         el('h3', {}, new Date(d.day).toLocaleDateString(undefined, { weekday: 'short' }), el('span', { textContent: String(new Date(d.day).getDate()) })),
         el('ul', { className: 'list' }, d.items.map((r) => el('li', { className: `pl-chip ${r.kind}${r.done ? ' done' : ''}${r.kind === 'event' && r.end <= p.now ? ' past' : ''}` },
-          r.kind === 'task' ? plTick(r) : null,
-          el('button', { className: 'pl-title', type: 'button', title: `${r.title}${plMeta(r, false) ? ` · ${plMeta(r, false)}` : ''}`, 'data-k': `pl:edit:${r.id}`, 'aria-label': `Edit ${r.title}`, on: { click: () => plEdit(r) } },
+          r.kind === 'task' && !r.readOnly ? plTick(r) : null,
+          el(r.readOnly ? 'span' : 'button', { className: 'pl-title', ...(r.readOnly ? {} : { type: 'button', 'data-k': `pl:edit:${r.id}`, 'aria-label': `Edit ${r.title}`, on: { click: () => plEdit(r) } }), title: `${r.title}${plMeta(r, false) ? ` · ${plMeta(r, false)}` : ''}` },
             r.kind === 'event' && !r.allDay ? el('small', { textContent: plTime(r.start) }) : null, r.title)))))))),
     ];
   }
-  const PL_VIEWS = [['today', 'Today'], ['upcoming', 'Upcoming'], ['lists', 'Lists'], ['week', 'Week']];
+
+  // ---- inbox: things captured to sort later. Say when, and Accept makes a task (a day) or an event (a time).
+  function plInbox(p) {
+    const cap = el('input', { type: 'text', value: pl.cap, placeholder: 'Something to sort out later', 'aria-label': 'Add to the inbox', 'data-k': 'pl-cap', autocomplete: 'off', spellcheck: false,
+      on: { input: (e) => { pl.cap = e.target.value; }, keydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); plCapture(); } } } });
+    return [
+      group(null, null, null, el('div', { className: 'keyform' }, el('span', { className: 'px field' }, cap), btn('Add', plCapture, { k: 'pl-cap-add' }))),
+      p.inbox.length
+        ? el('ul', { className: 'list', 'aria-label': 'Inbox' }, p.inbox.map((i) => {
+          const accept = () => plSend('accept', { id: i.id, when: pl.when[i.id] ?? '' });
+          const when = el('input', { type: 'text', value: pl.when[i.id] ?? '', placeholder: i.start == null ? 'When? friday, tue 3pm' : 'When? (blank keeps its date)', 'aria-label': `When for ${i.title}`, 'data-k': `pl-when:${i.id}`, autocomplete: 'off', spellcheck: false,
+            on: { input: (e) => { pl.when[i.id] = e.target.value; }, keydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); accept(); } } } });
+          return el('li', { className: 'item pl inbox' },
+            el('span', { className: 'mark', 'aria-hidden': 'true' }),
+            el('span', { className: 'text', dir: 'auto' }, el('span', { className: 'pl-title', textContent: i.title, title: i.title }), el('span', { className: 'px field pl-when' }, when)),
+            el('span', { className: 'row-btns icons' }, link('Accept', accept, { k: `pl:accept:${i.id}`, aria: `Accept ${i.title} into the planner` }),
+              link('Dismiss', () => plSend('dismiss', { id: i.id }), { k: `pl:dismiss:${i.id}`, aria: `Dismiss ${i.title}` })));
+        }))
+        : plEmpty('The inbox is empty. Add something above to sort it out later.'),
+    ];
+  }
+  const plCapture = () => { if (pl.cap.trim()) plSend('capture', { text: pl.cap }); };
+
+  // ---- calendar feeds: .ics links whose events and tasks appear in the planner, read-only, refreshed hourly.
+  function plFeedAdd() { if (pl.feedUrl.trim()) plSend('feedAdd', { name: pl.feedName, url: pl.feedUrl }); }
+  function plFeeds(p) {
+    const field = (key, label, placeholder, props = {}) => el('span', { className: 'px field' }, el('input', { type: 'text', value: pl[key], placeholder, 'aria-label': label, 'data-k': `pl-${key}`, autocomplete: 'off', spellcheck: false, ...props,
+      on: { input: (e) => { pl[key] = e.target.value; }, keydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); plFeedAdd(); } } } }));
+    const status = (f) => (f.lastFetch ? `Checked ${plDay(f.lastFetch)}, ${plTime(f.lastFetch)}` : f.on ? 'Not fetched yet' : 'Off');
+    return group('Calendar feeds', 'Follow a calendar link (an .ics or webcal:// address, such as a school calendar). Its events and tasks show here, read-only, and refresh every hour.', p.feeds.length || null,
+      el('div', { className: 'keyform' }, field('feedName', 'Feed name', 'Name', { maxLength: 60 }), field('feedUrl', 'Calendar link', 'https://… or webcal://…', { type: 'url' }), btn('Add', plFeedAdd, { k: 'pl-feed-add' })),
+      p.feeds.map((f) => el('div', { className: 'setting pl-feed' },
+        el('span', {}, f.name,
+          el('small', { title: f.host, textContent: [f.host, `${f.items} item${f.items === 1 ? '' : 's'}`, status(f)].filter(Boolean).join(' · ') }),
+          f.lastError ? el('small', { className: 'bad', textContent: f.lastError }) : null),
+        el('span', { className: 'row-btns' },
+          link('Refresh', () => plSend('feedRefresh', { id: f.id }), { k: `pl:feed-refresh:${f.id}`, aria: `Refresh ${f.name} now`, disabled: !f.on }),
+          armed('Remove', 'Confirm', `pl:feed-del:${f.id}`, () => plSend('feedRemove', { id: f.id }), `Remove ${f.name} and its items`),
+          el('button', { className: 'px switch', type: 'button', role: 'switch', 'aria-checked': String(f.on), 'aria-label': `${f.name} on`, 'data-k': `pl:feed-on:${f.id}`, on: { click: () => plSend('feedOn', { id: f.id, on: !f.on }) } })))));
+  }
+  const plViews = (p) => [['today', 'Today'], ['upcoming', 'Upcoming'], ['lists', 'Lists'], ['week', 'Week'], ['inbox', p.inbox?.length ? `Inbox (${p.inbox.length})` : 'Inbox']];
   function plannerPage() {
     const p = state.planner;
     if (!p || p.error) return [group('Planner', p?.error ? `I couldn’t read the planner: ${p.error}` : 'The planner isn’t ready yet.', null)];
-    const body = { today: plToday, upcoming: plUpcoming, lists: plLists, week: plWeek }[pl.view](p);
+    const body = { today: plToday, upcoming: plUpcoming, lists: plLists, week: plWeek, inbox: plInbox }[pl.view](p);
     return [
       plQuick(),
       pl.draft ? plForm(p.names) : null,
-      el('div', { className: 'mhead' }, tabRow('Planner views', 'pl-panel', PL_VIEWS, pl.view, (id) => { pl.view = id; pl.sx = null; })),
+      el('div', { className: 'mhead' }, tabRow('Planner views', 'pl-panel', plViews(p), pl.view, (id) => { pl.view = id; pl.sx = null; })),
       tabPanel('pl-panel', pl.view, ...body),
+      plFeeds(p),
     ];
   }
   // What the sidecar says back: what it understood of the line being typed, and how a change went.
@@ -1347,6 +1388,9 @@
     if (!m.ok) return;
     if (m.op === 'add' && m.text === pl.text) { pl.text = ''; pl.shown = null; render('pl-quick'); }
     else if (m.op === 'save' || (m.op === 'remove' && m.id === pl.edit)) { pl.edit = null; pl.draft = null; render(); }
+    else if (m.op === 'capture') { pl.cap = ''; render('pl-cap'); }
+    else if (m.op === 'accept' || m.op === 'dismiss') delete pl.when[m.id];
+    else if (m.op === 'feedAdd') { pl.feedName = ''; pl.feedUrl = ''; render('pl-feedName'); }
   }
 
   // ---------------------------------------------------------------- render
@@ -1698,13 +1742,16 @@
     const late = plItem({ title: 'Lab report', start: D(-2), overdue: true, cat: 'School', priority: 3 }), maths = plItem({ title: 'Math homework', start: D(0), cat: 'School', est: 45 });
     const walk = plItem({ title: 'Walk the dog', start: D(0), repeat: 'Every day', done: true }), gym = plItem({ title: 'Gym', kind: 'event', start: D(0, 7), end: D(0, 8), repeat: 'Every weekday', series: true, id: 'gym@0' });
     const dentist = plItem({ title: 'Dentist', kind: 'event', start: D(1, 15), end: D(1, 16), repeat: 'Every other week on Tuesday', series: true, id: 'dentist@1' }), trip = plItem({ title: 'Trip', kind: 'event', allDay: true, start: D(2), end: D(5) });
+    const lecture = plItem({ title: 'Physics lecture', kind: 'event', start: D(1, 10), end: D(1, 11), cat: 'School feed', readOnly: true });
     const essay = plItem({ title: 'Essay draft', start: D(3), cat: 'School', priority: 2 }), milk = plItem({ title: 'Buy milk', cat: 'Home' });
     const mon = D(-((new Date().getDay() + 6) % 7));
-    const wk = { 0: [gym, maths, walk], 1: [dentist, trip], 2: [trip], 3: [trip, essay], '-2': [late] };
+    const wk = { 0: [gym, maths, walk], 1: [dentist, lecture, trip], 2: [trip], 3: [trip, essay], '-2': [late] };
     s.planner = {
       now: at, error: null, overdue: 1, names: ['Home', 'School'],
+      inbox: [{ id: 'i1', title: 'Renew passport', start: null }, { id: 'i2', title: 'Ask Sam about the trip', start: null }],
+      feeds: [{ id: 'f1', name: 'School feed', host: 'canvas.school.example', on: true, lastFetch: at - 18 * 60e3, lastError: null, items: 24 }, { id: 'f2', name: 'Climbing club', host: 'calendar.club.example', on: true, lastFetch: at - 3600e3, lastError: 'The server answered 404.', items: 0 }],
       today: { overdue: [late], tasks: [maths, walk], events: [gym], reminders: [{ id: 'r1', text: 'Call back the landlord', due: D(0, 16), overdue: false }] },
-      upcoming: [{ day: D(1), today: false, items: [dentist, trip] }, { day: D(2), today: false, items: [trip] }, { day: D(3), today: false, items: [trip, essay] }],
+      upcoming: [{ day: D(1), today: false, items: [dentist, lecture, trip] }, { day: D(2), today: false, items: [trip] }, { day: D(3), today: false, items: [trip, essay] }],
       lists: [{ name: 'Home', open: 1, overdue: 0, done: 0, items: [milk] }, { name: 'School', open: 3, overdue: 1, done: 2, items: [late, maths, essay] }],
       week: { start: mon, offset: 0, days: Array.from({ length: 7 }, (_, i) => { const day = new Date(mon); day.setDate(day.getDate() + i); const k = Math.round((+day - D(0)) / 864e5); return { day: +day, today: k === 0, items: wk[k] ?? [] }; }) },
     };

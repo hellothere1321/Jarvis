@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'roamies-inbox-'));
+process.env.ROAMIES_DATA_DIR = dir;
+process.on('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
+const inbox = await import('../inbox.mjs');
+const planner = await import('../planner.mjs');
+const capture = await inbox.capture('Read chapter');
+assert.equal(await inbox.capture('The read chapter!'), null);
+assert.throws(() => inbox.triage(capture.id, { kind: 'event' }));
+assert.equal(inbox.list().length, 1);
+const event = await inbox.triage(capture.id, { kind: 'event', start: +new Date(2027, 0, 1, 12) });
+assert.equal(planner.get(event.id).title, 'Read chapter');
+assert.equal(inbox.list().length, 0);
+const other = await inbox.capture('Call home');
+assert.equal(await inbox.dismiss(other.id), true);
+assert.equal(inbox.list().length, 0);

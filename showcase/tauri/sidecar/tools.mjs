@@ -16,6 +16,8 @@ import { linuxSession, seesPointer } from './platform.mjs';
 import { addCommitment, forgetFact, getCommitment, parseDue, parseRepeat, repeatLabel, updateCommitment } from './store.mjs';
 import * as planner from './planner.mjs';
 import * as timelog from './timelog.mjs';
+import * as inbox from './inbox.mjs';
+import { hostOf, normalizeUrl } from './feeds.mjs';
 import { addDays, midnight, parseWhen } from './when.mjs';
 import { snoozeTarget, snoozeUntil } from './snooze.mjs';
 import { addJob, getJob, jobsText, removeJob, updateJob } from './jobs.mjs';
@@ -321,9 +323,9 @@ function plannerFound(item, id) {
   return item;
 }
 
-export const PLANNER_TOOLS = new Set(['add_task', 'add_event', 'update_planner_item', 'complete_task', 'delete_planner_item', 'list_planner', 'time_log']);
+export const PLANNER_TOOLS = new Set(['add_task', 'add_event', 'update_planner_item', 'complete_task', 'delete_planner_item', 'list_planner', 'time_log', 'list_inbox', 'accept_inbox_item', 'add_feed', 'remove_feed']);
 
-export function createTools({ vault = null, allowActions, ui, ask, openUrl, onCommitments, onPlanner = () => {}, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', skipAllow = () => false, jobs = null, skills = null }) {
+export function createTools({ vault = null, allowActions, ui, ask, openUrl, onCommitments, onPlanner = () => {}, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', skipAllow = () => false, jobs = null, skills = null, feeds = null }) {
   // Relative paths (and run_command) start in workdir: ~/Roamies for the chat, its own folder for an agent.
   const at = (p) => { const s = String(p ?? ''); return /^~(?=$|\/|\\)/.test(s) || path.isAbsolute(s) || /^[a-z]:[\\/]/i.test(s) ? s : path.join(workdir, s); };
   const where = workdir === HOME ? "the user's home folder" : `its working folder (${workdir})`;
@@ -1228,6 +1230,58 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
         return [`Focus time: ${t.total} minutes total.`, ...t.byItem.map((x) => `- ${x.title}${x.itemId ? ` (${x.itemId})` : ''}: ${x.minutes} min`)].join('\n');
       },
     },
+    {
+      name: 'list_inbox',
+      description: 'List the planner inbox: things captured to sort later, with ids. Accept one with accept_inbox_item.',
+      parameters: z.object({}),
+      execute: async () => {
+        const items = inbox.list();
+        if (!items.length) return 'The inbox is empty.';
+        return items.slice(0, 20).map((item) => `${item.id} · ${item.title.replace(/\s+/g, ' ')}`).join('\n') + (items.length > 20 ? `\n${items.length - 20} more.` : '');
+      },
+    },
+    {
+      name: 'accept_inbox_item',
+      description: 'Move an inbox item into the planner by id (list_inbox shows them). when is a date for a task ("Friday") or a date and time for an event ("Friday 3pm", "Tuesday 3 to 4pm"); ask the user when if they did not say.',
+      parameters: z.object({ id: z.string(), when: plannerWhen }),
+      execute: async ({ id, when }) => {
+        const now = Date.now(), date = plannerDate(when, now);
+        const item = inbox.list().find((candidate) => candidate.id === id);
+        if (!item) throw new Error(`No inbox item with id ${id}. Use list_inbox to find it.`);
+        const made = await inbox.triage(id, date.allDay
+          ? { kind: 'task', start: midnight(date.start) }
+          : { kind: 'event', start: date.start, ...(date.end != null && { end: date.end }) });
+        onPlanner();
+        return `Added ${planner.describeItem(made, now)}.`;
+      },
+    },
+    ...(feeds ? [{
+      name: 'add_feed',
+      description: `Subscribe to a calendar feed: an .ics or webcal:// link (a school or LMS calendar, a team or sports calendar). Its events and tasks show in the planner, read-only, and refresh every hour. Asks ${userName} first. name is optional.`,
+      parameters: z.object({ url: z.string().trim().min(1).max(2000), name: z.string().max(60).optional() }),
+      execute: async ({ url, name }, ctx) => {
+        const host = hostOf(normalizeUrl(url)); // a link that is never allowed doesn't get as far as asking
+        if (!(await confirm(`Subscribe to the calendar at ${host}? Its events and tasks will appear in your planner.`, ctx))) throw new Error(`${userName} said no, so I didn't add the feed.`);
+        const feed = await feeds.add({ name, url });
+        const [result] = await feeds.refresh([feed.id]);
+        onPlanner();
+        if (!result?.ok) return `Added the feed "${feed.name}" (${host}) but the first fetch failed: ${result?.error ?? 'unknown error'}. It tries again every hour.`;
+        return `Added the feed "${feed.name}" (${host}): ${result.added} items are in the planner now.`;
+      },
+    }, {
+      name: 'remove_feed',
+      description: `Remove a calendar feed and all the planner items it made. feed is its name or id (a feed that does not match lists the ones there are). Asks ${userName} first.`,
+      parameters: z.object({ feed: z.string().trim().min(1).max(80) }),
+      execute: async ({ feed: which }, ctx) => {
+        const all = feeds.list(), key = which.toLowerCase();
+        const feed = all.find((f) => f.id === which) ?? all.find((f) => f.name.toLowerCase() === key) ?? all.find((f) => f.host.toLowerCase() === key);
+        if (!feed) throw new Error(all.length ? `No feed called "${which}". The feeds are: ${all.map((f) => `${f.name} (${f.id})`).join(', ')}.` : 'There are no calendar feeds.');
+        if (!(await confirm(`Remove the calendar feed "${feed.name}" and its ${feed.items} planner items?`, ctx))) throw new Error(`${userName} said no, so I kept the feed.`);
+        await feeds.remove(feed.id);
+        onPlanner();
+        return `Removed the feed "${feed.name}" and its items.`;
+      },
+    }] : []),
     {
       name: 'forget_fact', description: 'Delete a saved fact that is wrong or that the user asks you to forget. Ids are in the memory section of the <live-state> block.',
       parameters: z.object({ id: z.string() }),

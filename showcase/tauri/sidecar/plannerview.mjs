@@ -5,10 +5,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DIR } from './store.mjs';
 import * as planner from './planner.mjs';
+import * as inbox from './inbox.mjs';
 import { describeRule, formatRule, nextOccurrence, parseRule, ruleFromWords } from './recur.mjs';
 import { addDays, dayNumber, localDate, midnight, parseWhen } from './when.mjs';
 
 const file = path.join(DIR, 'planner.json');
+// The Inbox and Feeds blocks have their own files; the page follows them too.
+const watched = ['planner.json', 'inbox.json', 'feeds.json'].map((name) => path.join(DIR, name));
 const pad = (n) => String(n).padStart(2, '0');
 export const dayString = (time) => { const d = new Date(time); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
 export const timeString = (time) => { const d = new Date(time); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
@@ -43,7 +46,7 @@ function row(item, now) {
     id: item.series ? `${item.id}@${item.start}` : item.id, itemId: item.id, kind: item.kind, title: item.title, notes: item.notes,
     start: item.start, end: event ? item.end : null, allDay: item.allDay, done: item.done,
     overdue: !event && !item.done && item.start != null && item.start < today,
-    repeat: words, series: !!item.series, cat: item.cat, priority: item.priority, est: item.est, spent: item.spent, link: item.link,
+    repeat: words, series: !!item.series, readOnly: planner.isFeedItem(item), cat: item.cat, priority: item.priority, est: item.est, spent: item.spent, link: item.link,
     form: {
       title: item.title, notes: item.notes, kind: item.kind, allDay: item.allDay,
       date: anchor == null ? '' : dayString(anchor), time: timed ? timeString(anchor) : '',
@@ -73,8 +76,8 @@ export function weekStart(now, offset = 0) {
   return addDays(midnight(now), -mondayIndex(now) + 7 * clampWeek(offset));
 }
 
-// reminders: the open commitments from store.mjs, shown read-only.
-export function plannerView(now = Date.now(), { week = 0, reminders = [] } = {}) {
+// reminders: the open commitments from store.mjs, shown read-only. feeds: the calendar feeds (feeds.mjs list(), no links).
+export function plannerView(now = Date.now(), { week = 0, reminders = [], feeds = [] } = {}) {
   try {
     const today = midnight(now), tomorrow = addDays(today, 1);
     const todays = planner.list({ from: today, to: tomorrow, includeOverdue: true, includeDone: true, now })
@@ -106,6 +109,8 @@ export function plannerView(now = Date.now(), { week = 0, reminders = [] } = {})
       upcoming, lists,
       week: { start: weekFirst, offset: clampWeek(week), days: byDay(planner.list({ from: weekFirst, to: addDays(weekFirst, 7), includeDone: true, now }), weekFirst, 7, now) },
       names: lists.map((l) => l.name).filter(Boolean),
+      inbox: inbox.list().map(({ id, title, start }) => ({ id, title, start: start ?? null })),
+      feeds,
     };
   } catch (e) {
     return { now, error: String(e?.message ?? e).slice(0, 200) };
@@ -114,7 +119,8 @@ export function plannerView(now = Date.now(), { week = 0, reminders = [] } = {})
 
 // Changes when the planner file or the day does, so the page can follow changes made anywhere.
 export function plannerStamp(now = Date.now()) {
-  try { const s = fs.statSync(file); return `${s.mtimeMs}:${s.size}:${dayNumber(now)}`; } catch { return `none:${dayNumber(now)}`; }
+  const stat = (f) => { try { const s = fs.statSync(f); return `${s.mtimeMs}:${s.size}`; } catch { return 'none'; } };
+  return `${watched.map(stat).join('|')}:${dayNumber(now)}`;
 }
 
 // ---------- quick add ----------
@@ -215,6 +221,48 @@ const dayLabel = (time) => new Date(time).toLocaleDateString(undefined, { weekda
 const missing = () => bad('That item is gone. It may have been changed somewhere else.');
 
 const handlers = {
+  // ---- inbox: things to sort later. Accepting needs a when, which also decides task (a day) or event (a time).
+  async capture({ text }) {
+    const title = String(text ?? '').replace(/\s+/g, ' ').trim();
+    if (!title) return bad('Type what to put in the inbox first.');
+    return (await inbox.capture(title)) ? ok(`Put “${title}” in the inbox.`) : ok('That’s already in the inbox or on your list.');
+  },
+  async accept({ id, when }, now) {
+    const item = inbox.list().find((candidate) => candidate.id === id);
+    if (!item) return bad('That inbox item is gone.');
+    const text = String(when ?? '').trim(), parsed = text ? parseWhen(text, now) : null;
+    if (text && !parsed) return bad('I couldn’t read that date. Try “friday” or “tue 3pm”.');
+    if (!parsed && item.start == null) return bad('Say when: “friday” or “tue 3pm”.');
+    const timed = parsed && !parsed.allDay;
+    const made = await inbox.triage(id, parsed
+      ? { kind: timed ? 'event' : 'task', start: timed ? parsed.start : midnight(parsed.start), ...(timed && parsed.end != null && { end: parsed.end }) }
+      : { kind: 'task', start: midnight(item.start) });
+    return made ? ok(`Added “${made.title}” to your planner.`, { added: made.id }) : bad('That inbox item is gone.');
+  },
+  async dismiss({ id }) {
+    return (await inbox.dismiss(id)) ? ok('Dismissed.') : bad('That inbox item is gone.');
+  },
+  // ---- calendar feeds. A refresh runs on in the background: the page follows the feed file when it's done.
+  async feedAdd({ name, url }, now, open, { feeds } = {}) {
+    if (!feeds) return bad('Calendar feeds aren’t available.');
+    const feed = await feeds.add({ name, url });
+    void feeds.refresh([feed.id]);
+    return ok(`Added “${feed.name}”. Fetching it now.`);
+  },
+  async feedOn({ id, on }, now, open, { feeds } = {}) {
+    if (!feeds) return bad('Calendar feeds aren’t available.');
+    return (await feeds.setOn(id, on !== false)) ? ok(on === false ? 'Turned off. Its items left your planner.' : 'Turned on.') : bad('That feed is gone.');
+  },
+  async feedRemove({ id }, now, open, { feeds } = {}) {
+    if (!feeds) return bad('Calendar feeds aren’t available.');
+    const gone = await feeds.remove(id);
+    return gone ? ok(`Removed “${gone.name}” and its items.`) : bad('That feed is gone.');
+  },
+  async feedRefresh({ id }, now, open, { feeds } = {}) {
+    if (!feeds) return bad('Calendar feeds aren’t available.');
+    void feeds.refresh(id ? [id] : null);
+    return ok('Refreshing.');
+  },
   async add({ text, kind }, now) {
     const parsed = parseQuick(text, now, { kind: kind === 'task' || kind === 'event' ? kind : null });
     if (!parsed.ok) return bad(parsed.error || 'Type what to add first.');
@@ -224,6 +272,7 @@ const handlers = {
   async save({ id, form }, now) {
     const item = planner.get(id);
     if (!item) return missing();
+    if (planner.isFeedItem(item)) return bad('That comes from a calendar feed, so it can’t be changed here.');
     const { kind, values, local } = fromForm(form ?? {}, item, now);
     if (kind === item.kind) {
       const saved = await planner.update(id, values, now);
@@ -262,7 +311,7 @@ const handlers = {
 };
 
 // Runs one of the page's actions. Never throws: a refused change comes back as { ok: false, note }.
-export async function act(op, data = {}, { now = Date.now(), open = () => {} } = {}) {
+export async function act(op, data = {}, { now = Date.now(), open = () => {}, feeds = null } = {}) {
   if (!Object.hasOwn(handlers, op)) return bad('I don’t know that planner action.');
-  try { return await handlers[op](data ?? {}, now, open); } catch (e) { return bad(String(e?.message ?? e)); }
+  try { return await handlers[op](data ?? {}, now, open, { feeds }); } catch (e) { return bad(String(e?.message ?? e)); }
 }

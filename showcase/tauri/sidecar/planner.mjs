@@ -17,6 +17,8 @@ const defaults = {
 const localFields = ['est', 'spent', 'source', 'uid', 'link', 'blockFor'];
 const editable = ['title', 'notes', 'start', 'end', 'allDay', 'alert', 'repeat', 'skip', 'cat', 'priority'];
 const picked = (fields, values) => Object.fromEntries(fields.filter((key) => Object.hasOwn(values, key)).map((key) => [key, values[key]]));
+export const isFeedItem = (item) => String(item?.source ?? '').startsWith('feed:');
+const readOnly = () => new Error('That comes from a calendar feed, so it can’t be changed here. Remove the feed to remove it.');
 const live = (item) => !item.deleted && (item.kind === 'task' || item.kind === 'event');
 const validDate = (date) => typeof date === 'number' && Number.isFinite(+new Date(date));
 const order = (a, b) => (a.start ?? Infinity) - (b.start ?? Infinity) || b.priority - a.priority || a.title.localeCompare(b.title);
@@ -124,6 +126,7 @@ export function update(id, values, now = Date.now()) {
   return change((items) => {
     const item = items.find((candidate) => candidate.id === id && live(candidate));
     if (!item) return null;
+    if (isFeedItem(item)) throw readOnly();
     const patch = picked(editable, values), next = { ...item, ...patch };
     if (item.kind === 'task' && patch.start === null && next.repeat) throw new Error('Clear the repeat before clearing a repeating task’s due date.');
     if (item.kind === 'event' && !Object.hasOwn(patch, 'end')) {
@@ -158,6 +161,42 @@ export function addSpent(id, minutes, now = Date.now()) {
   });
 }
 
+// A calendar feed owns the items with its source ('feed:<id>'): one refresh adds, updates and removes them in a single
+// write. They are removed outright (no tombstone: they never go to Google) and what the user keeps locally (estimate,
+// time spent) survives an update. entries: { uid, kind, title, notes, start, end, allDay, repeat, skip, link, done }.
+export function syncFeed(source, entries, now = Date.now()) {
+  if (!source.startsWith('feed:')) throw new Error('A feed source starts with feed:.');
+  return change((items) => {
+    const counts = { added: 0, updated: 0, removed: 0, skipped: 0 }, seen = new Set();
+    for (const entry of entries) {
+      if (!entry.uid || seen.has(entry.uid)) continue;
+      seen.add(entry.uid);
+      const existing = items.find((item) => item.source === source && item.uid === entry.uid);
+      try {
+        const base = existing ?? { ...defaults, skip: [], id: randomUUID(), source, uid: entry.uid, dirty: false, updated: now };
+        const next = { ...base, ...picked([...editable, 'kind', 'link'], entry), deleted: false, dirty: false };
+        next.skip = next.skip.filter(validDate);
+        if (next.kind === 'task') {
+          next.done = !!entry.done;
+          next.lastDone = next.done ? (existing?.done ? existing.lastDone : now) : null;
+        }
+        normalize(next, now, true);
+        if (existing && (next.start !== existing.start || next.repeat !== existing.repeat || next.allDay !== existing.allDay)) Object.assign(next, { fired: false, firedFor: null });
+        if (!existing) { items.push(next); counts.added++; continue; }
+        const before = JSON.stringify(existing);
+        Object.assign(existing, next);
+        if (JSON.stringify(existing) !== before) { existing.updated = now; counts.updated++; }
+      } catch {
+        counts.skipped++; // a bad entry never stops the others
+      }
+    }
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i].source === source && !seen.has(items[i].uid)) { items.splice(i, 1); counts.removed++; }
+    }
+    return counts.added || counts.updated || counts.removed ? counts : null;
+  }).then((counts) => counts ?? { added: 0, updated: 0, removed: 0, skipped: 0 });
+}
+
 export function advanceCompletedTask(item, now) {
   const rule = parseRule(item.repeat);
   if (!rule || item.start == null) return false;
@@ -178,6 +217,7 @@ export function advanceCompletedTask(item, now) {
 export function complete(id, now = Date.now(), { done = true } = {}) {
   return change((items) => {
     const item = items.find((candidate) => candidate.id === id && live(candidate) && candidate.kind === 'task');
+    if (item && isFeedItem(item)) throw readOnly();
     if (!item || item.done === done) return item ?? null;
     if (done && advanceCompletedTask(item, now)) return item;
     item.done = done;
@@ -190,6 +230,7 @@ export function remove(id, now = Date.now()) {
   return change((items) => {
     const item = items.find((candidate) => candidate.id === id && live(candidate));
     if (!item) return null;
+    if (isFeedItem(item)) throw readOnly();
     item.deleted = true;
     return touched(item, now);
   }, true);
@@ -222,6 +263,7 @@ export function skipOccurrence(id, start, allDay = false, now = Date.now()) {
   return change((items) => {
     const item = items.find((candidate) => candidate.id === id && live(candidate) && candidate.kind === 'event' && candidate.repeat);
     if (!item) return null;
+    if (isFeedItem(item)) throw readOnly();
     const from = allDay ? midnight(start) : start;
     const to = allDay ? addDays(from, 1) : start + 1;
     const event = eventOccurrences(item, from, to).find((entry) => entry.start >= from);

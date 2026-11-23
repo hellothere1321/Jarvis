@@ -30,6 +30,7 @@ import {
 } from './store.mjs';
 import * as planner from './planner.mjs';
 import { createGoogleSync } from './googlesync.mjs';
+import { createFeeds } from './feeds.mjs';
 import { act as plannerAct, clampWeek, plannerStamp, plannerView, preview as plannerPreview } from './plannerview.mjs';
 import { feedbackOf, foldInput, rateTarget, foldPrompt, lessonInput, lessonPrompt, memoryInput, memoryPrompt, oneShot, parseBrain, parseLesson, parseSkill, shouldLearn, skillInput, skillPrompt, soundsWrong, transcript } from './brain.mjs';
 import { briefNote } from './brief.mjs';
@@ -262,6 +263,8 @@ const googleSync = createGoogleSync({
     openUrl(url);
   },
 });
+// Calendar feeds (feeds.mjs): fetched at start and every hour; their items land in the planner, read-only.
+const feeds = createFeeds({ changed: () => { scheduleReminders(); panel(); } });
 let voiceProblemAt = 0;
 // Beats made on this computer (a Gemini voice's, or a Fish voice the app doesn't ship) are kept, so each voice
 // and model's are only made once.
@@ -695,6 +698,7 @@ const { tools, hands, whereNow, frontNow: frontData, frontBounds, ink, nextTurn 
   commitmentsText: () => [commitmentsText(), doneTodayText() && `Done today:\n${doneTodayText()}`].filter(Boolean).join('\n'),
   onCommitments: commitmentsChanged,
   onPlanner: () => { scheduleReminders(); panel(); },
+  feeds,
   showList: () => showList({ seconds: 20 }),
   fmtWhen: (ms) => fmtWhen(ms),
   onPlan: (args) => trail.plan(args),
@@ -2493,14 +2497,14 @@ function panelState() {
 let plannerWeek = 0, plannerSeen = '';
 function plannerPanel() {
   plannerSeen = plannerStamp();
-  return plannerView(Date.now(), { week: plannerWeek, reminders: openCommitments() });
+  return plannerView(Date.now(), { week: plannerWeek, reminders: openCommitments(), feeds: feeds.list() });
 }
 setInterval(() => { if (panelOpen && plannerStamp() !== plannerSeen) panel(); }, 4000).unref();
 async function plannerFromPanel(op, data = {}) {
   if (op === 'preview') { panelOpen && send({ type: 'panel', msg: { kind: 'planner', what: 'preview', text: String(data.text ?? ''), shown: plannerPreview(data.text, Date.now(), { kind: data.kind }) } }); return; }
   if (op === 'week') { plannerWeek = data.by ? clampWeek(plannerWeek + (data.by > 0 ? 1 : -1)) : 0; panel(); return; }
-  const r = await plannerAct(op, data, { open: openUrl });
-  if (r.ok) { scheduleReminders(); showList(); }
+  const r = await plannerAct(op, data, { open: openUrl, feeds });
+  if (r.ok) { scheduleReminders(); if (!/^(feed|capture|dismiss)/.test(op)) showList(); }
   panel();
   // After the state above (the page redraws from it), so a cleared box or a closed form shows the new list.
   setImmediate(() => panelOpen && send({ type: 'panel', msg: { kind: 'planner', what: 'done', op, ok: r.ok, note: r.note, text: data.text ?? null, id: data.id ?? null } }));
@@ -3262,6 +3266,7 @@ function queueGoogleSync(delay = 2000) {
 planner.onLocalChange(() => queueGoogleSync());
 setInterval(() => queueGoogleSync(0), 300_000).unref();
 void googleSync.init().then(() => queueGoogleSync(0));
+feeds.start();
 
 // Scheduled jobs (jobs.mjs): at its time each one starts a background agent, with the usual safety checks and Allow
 // prompts; what it finds comes back as agent news (desk.tick). A recurring job carries on in its last run's folder.

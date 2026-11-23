@@ -180,6 +180,9 @@ try {
 
   const local = await planner.add({ title: 'Upload task', cat: 'Work', start: time(6), est: 13, source: 'local-tag' }, now);
   const foreign = await planner.add({ kind: 'event', title: 'Feed only', start: time(6), source: 'feed:test' }, now);
+  // Calendar-feed tasks are never pushed either: not a changed one, and not one already deleted that still has a Google id.
+  const feedTask = await planner.add({ kind: 'task', title: 'Feed task', start: time(6), source: 'feed:test', uid: 'feed-task-1' }, now);
+  await planner.applySync((items, add) => { add({ kind: 'task', title: 'Dropped feed task', start: time(6), source: 'feed:test', uid: 'feed-task-2', gId: 'ghost', gList: 'default', deleted: true, dirty: true, updated: now }); });
   const localEvent = await planner.add({ kind: 'event', title: 'Upload event', start: time(6), allDay: true, repeat: 'daily', skip: [time(8)] }, now);
   await checkSync();
   assert.equal(refreshCalls, 1, 'a 401 refreshes the access token and retries');
@@ -191,13 +194,16 @@ try {
   assert.equal(find(series.id).repeat, 'FREQ=DAILY;COUNT=5');
   assert.equal(find(cancelled.id), undefined);
   assert.equal(planner.get(foreign.id).gId, null);
+  assert.equal(planner.get(feedTask.id).gId, null);
+  assert.equal(planner.get(feedTask.id).dirty, true, 'a feed task is never marked as synced');
   assert.equal(planner.get(local.id).dirty, false);
   assert.equal(planner.get(localEvent.id).dirty, false);
   const firstWrites = writes.splice(0);
   assert.deepEqual(firstWrites.map(({ method, route }) => [method, route]), [['POST', '/tasks/work/tasks'], ['POST', '/events']]);
   assert.equal(firstWrites[0].body.due, '2026-05-06T00:00:00.000Z');
   assert.deepEqual(firstWrites[1].body.recurrence, ['RRULE:FREQ=DAILY', 'EXDATE;VALUE=DATE:20260508']);
-  assert.doesNotMatch(JSON.stringify(firstWrites), /est|source|spent|blockFor|Feed only/);
+  assert.doesNotMatch(JSON.stringify(firstWrites), /est|source|spent|blockFor|Feed only|Feed task|Dropped feed task/);
+  assert.equal(calls.some(([method, route]) => method === 'DELETE' && route.endsWith('/ghost')), false, 'a deleted feed task isn’t deleted in Google');
 
   calendarMode = 'incremental';
   now += 10_000;
@@ -231,6 +237,8 @@ try {
   assert.deepEqual(find(series.id).skip, [time(7), time(8)]);
   assert.equal(planner.syncItems().some(({ id }) => id === localEvent.id), false);
   assert.equal(writes.at(-1).method, 'DELETE');
+  assert.equal(planner.get(feedTask.id).gId, null, 'still not pushed after later syncs');
+  assert.equal(writes.some(({ body }) => JSON.stringify(body ?? {}).includes('Feed')), false);
 
   fail = true;
   assert.equal(await sync.sync(), false);

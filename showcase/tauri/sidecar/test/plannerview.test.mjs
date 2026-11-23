@@ -273,6 +273,61 @@ await P.add({ title: 'Another' }, now);
 assert.notEqual(V.plannerStamp(now), stamp);
 assert.notEqual(V.plannerStamp(at(11, 5)), V.plannerStamp(now));
 
+// The inbox: capture, accept (a day makes a task, a time an event) and dismiss.
+await reset();
+assert.equal((await V.act('capture', { text: '  ' }, { now })).ok, false);
+assert.equal((await V.act('capture', { text: 'Call the bank' }, { now })).ok, true);
+assert.equal((await V.act('capture', { text: 'Email Sam' }, { now })).ok, true);
+view = V.plannerView(now);
+assert.deepEqual(view.inbox.map((i) => i.title), ['Call the bank', 'Email Sam']);
+const [bank, sam] = view.inbox;
+assert.match((await V.act('accept', { id: bank.id, when: '' }, { now })).note, /Say when/);
+assert.match((await V.act('accept', { id: bank.id, when: 'blorp' }, { now })).note, /couldn’t read/);
+assert.equal((await V.act('accept', { id: bank.id, when: 'friday' }, { now })).ok, true);
+assert.equal((await V.act('accept', { id: sam.id, when: 'friday 3pm' }, { now })).ok, true);
+assert.equal(P.list({ kind: 'task', now }).filter((i) => i.title === 'Call the bank').length, 1);
+assert.equal(P.list({ kind: 'event', from: at(11, 6), to: at(11, 7), now }).filter((i) => i.title === 'Email Sam').length, 1);
+assert.equal(V.plannerView(now).inbox.length, 0);
+const later = await V.act('capture', { text: 'Book flights' }, { now }).then(() => V.plannerView(now).inbox[0]);
+assert.equal((await V.act('dismiss', { id: later.id }, { now })).ok, true);
+assert.equal((await V.act('dismiss', { id: later.id }, { now })).ok, false);
+
+// Feed items are read-only on the page: marked, and every change to one is refused (a kind change too, which would
+// otherwise make a copy before the delete failed).
+await reset();
+const synced = await P.syncFeed('feed:t1', [{ uid: 'u1', kind: 'event', title: 'Lecture', start: at(11, 5, 9), end: at(11, 5, 10), allDay: false, repeat: null, skip: [], link: '', notes: '' }], now);
+assert.equal(synced.added, 1);
+view = V.plannerView(now, { week: 0 });
+const locked = view.week.days.flatMap((d) => d.items).find((r) => r.title === 'Lecture');
+assert.equal(locked.readOnly, true);
+assert.equal((await V.act('save', { id: locked.itemId, form: { ...locked.form, kind: 'task', date: '2026-11-05' } }, { now })).ok, false);
+assert.equal((await V.act('remove', { id: locked.itemId }, { now })).ok, false);
+assert.equal(P.list({ now }).length, 1);
+assert.equal(view.week.days.flatMap((d) => d.items).filter((r) => r.readOnly).length, 1);
+
+// Feed buttons go to the feeds object, and say so when there isn't one.
+const calls = [];
+const fakeFeeds = {
+  add: async (f) => { calls.push(['add', f]); return { id: 'f1', name: f.name }; },
+  refresh: async (ids) => { calls.push(['refresh', ids]); return []; },
+  setOn: async (id, on) => { calls.push(['on', id, on]); return id === 'f1' ? { id } : null; },
+  remove: async (id) => { calls.push(['remove', id]); return id === 'f1' ? { id, name: 'School' } : null; },
+};
+assert.equal((await V.act('feedAdd', { name: 'School', url: 'https://x.test/a.ics' }, { now })).ok, false);
+assert.equal((await V.act('feedAdd', { name: 'School', url: 'https://x.test/a.ics' }, { now, feeds: fakeFeeds })).ok, true);
+assert.equal((await V.act('feedOn', { id: 'f1', on: false }, { now, feeds: fakeFeeds })).ok, true);
+assert.equal((await V.act('feedOn', { id: 'zz', on: true }, { now, feeds: fakeFeeds })).ok, false);
+assert.equal((await V.act('feedRefresh', {}, { now, feeds: fakeFeeds })).ok, true);
+assert.equal((await V.act('feedRemove', { id: 'f1' }, { now, feeds: fakeFeeds })).ok, true);
+assert.equal((await V.act('feedRemove', { id: 'zz' }, { now, feeds: fakeFeeds })).ok, false);
+assert.deepEqual(calls.map((c) => c[0]), ['add', 'refresh', 'on', 'on', 'refresh', 'remove', 'remove']);
+assert.deepEqual(V.plannerView(now, { feeds: [{ id: 'f1', name: 'School', host: 'x.test' }] }).feeds, [{ id: 'f1', name: 'School', host: 'x.test' }]);
+
+// The stamp follows the inbox and feeds files too.
+const stampBefore = V.plannerStamp(now);
+await V.act('capture', { text: 'Stamp me' }, { now });
+assert.notEqual(V.plannerStamp(now), stampBefore);
+
 // A planner file that can't be read gives the page an error, not a crash.
 fs.writeFileSync(file, '{"not":"a list"}');
 fs.rmSync(file + '.bak', { force: true });
