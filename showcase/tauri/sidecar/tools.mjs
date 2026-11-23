@@ -323,7 +323,7 @@ function plannerFound(item, id) {
 
 export const PLANNER_TOOLS = new Set(['add_task', 'add_event', 'update_planner_item', 'complete_task', 'delete_planner_item', 'list_planner', 'time_log']);
 
-export function createTools({ allowActions, ui, ask, openUrl, onCommitments, onPlanner = () => {}, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', skipAllow = () => false, jobs = null, skills = null }) {
+export function createTools({ vault = null, allowActions, ui, ask, openUrl, onCommitments, onPlanner = () => {}, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', skipAllow = () => false, jobs = null, skills = null }) {
   // Relative paths (and run_command) start in workdir: ~/Roamies for the chat, its own folder for an agent.
   const at = (p) => { const s = String(p ?? ''); return /^~(?=$|\/|\\)/.test(s) || path.isAbsolute(s) || /^[a-z]:[\\/]/i.test(s) ? s : path.join(workdir, s); };
   const where = workdir === HOME ? "the user's home folder" : `its working folder (${workdir})`;
@@ -839,6 +839,17 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, onP
   };
 
   const tools = [
+    ...(vault ? [{
+      name: 'list_logins', description: 'List saved sites and login ids (usernames stay private; several logins for one site are numbered). To add or change a password, direct the user to the Vault page. Never ask for a password in chat.',
+      parameters: z.object({}), execute: async () => JSON.stringify(vault.publicList(await vault.list())),
+    }, {
+      name: 'fill_login', description: 'Fill a saved login when requested. The user must focus the username field on the saved site first. Leaves the form for the user to submit.',
+      parameters: z.object({ id: z.string().uuid() }),
+      execute: async ({ id }) => {
+        if (!allowActions()) throw new Error(actionsOff);
+        return vault.fill(id);
+      },
+    }] : []),
     {
       name: 'take_screenshot',
       description: "Look at the screen, only for what words can't show (images, layout, colours). target: 'front' (the window they're in: the default for 'this' or 'here'), an app name ('browser', 'Figma'; works behind other windows), 'window:<id>' from list_windows, or 'screen' (only when it must be everything).",

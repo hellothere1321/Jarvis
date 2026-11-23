@@ -1350,7 +1350,76 @@
   }
 
   // ---------------------------------------------------------------- render
-  const PANES = { home, memory, planner: plannerPage, meetings: meetingsPage, abilities: abilitiesPage, model: modelPage, appearance: appearancePage, speaking: speakingPage, listening: listeningPage, shortcuts: shortcutsPage, general: generalPage, about: aboutPage, whatsnew: whatsNewPage };
+  const vaultWindows = /Win/i.test(navigator.platform);
+  let vaultForm, vaultList, vaultRequest, vaultRows = [], vaultGeneration = 0;
+  if (vaultWindows) {
+    $('nav-memory').closest('li').after(el('li', {}, el('button', { id: 'nav-vault', className: 'px navi', type: 'button',
+      'data-page': 'vault', 'aria-controls': 'pane-vault', textContent: 'Vault' })));
+    $('pane-memory').after(el('section', { id: 'pane-vault', className: 'pane', 'aria-labelledby': 'nav-vault', hidden: true }));
+  }
+  function resetVault() {
+    vaultGeneration++;
+    vaultRequest = null;
+    vaultRows = [];
+    vaultForm?.reset();
+    vaultForm = vaultList = null;
+    $('pane-vault')?.replaceChildren();
+  }
+  const b64 = (bytes) => btoa(Array.from(new Uint8Array(bytes), (v) => String.fromCharCode(v)).join(''));
+  const bytes = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+  const utf8 = new TextEncoder();
+  async function vaultAction(request) {
+    const generation = vaultGeneration;
+    try {
+      const alg = { name: 'ECDH', namedCurve: 'P-256' };
+      const pair = await crypto.subtle.generateKey(alg, true, ['deriveKey']);
+      const server = await crypto.subtle.importKey('raw', bytes(state.vaultKey), alg, false, []);
+      const key = await crypto.subtle.deriveKey({ name: 'ECDH', public: server }, pair.privateKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: utf8.encode('request') }, key, utf8.encode(JSON.stringify(request)));
+      const peer = b64(await crypto.subtle.exportKey('raw', pair.publicKey));
+      if (generation !== vaultGeneration) return;
+      vaultRequest = { peer, action: request.action };
+      await invoke('sidecar_send', { msg: { type: 'panel_vault', channel: state.vaultKey, peer, box: { iv: b64(iv), data: b64(data) } } });
+    } catch { note('Could not complete the vault request.', true); }
+  }
+  function vaultPage() {
+    if (!vaultForm) {
+      const field = (name, type = 'text') => el('input', { name, type, required: true, autocomplete: type === 'password' ? 'new-password' : 'off', placeholder: name, 'aria-label': name });
+      const site = field('Site'), user = field('Username'), pass = field('Password', 'password');
+      vaultForm = el('form', { className: 'group', on: { submit: (e) => {
+        e.preventDefault();
+        vaultAction({ action: 'save', id: vaultForm.dataset.id, address: site.value.trim(), username: user.value, password: pass.value });
+        pass.value = '';
+      } } }, el('p', { textContent: 'To fill a login, focus the username field in your browser and ask Roamies to fill it.' }),
+      site, user, pass, el('button', { className: 'px btn', textContent: 'Save login' }),
+      btn('New login', () => { vaultForm.reset(); delete vaultForm.dataset.id; site.focus(); }));
+      vaultList = el('div', { className: 'group' });
+      send({ type: 'panel_vault', channel: state.vaultKey });
+    }
+    vaultList.replaceChildren(...vaultRows.map((r) => {
+      const address = r.scheme + '://' + r.site + (r.port ? ':' + r.port : '');
+      return el('div', { className: 'item vault-login' }, el('span', { textContent: address + ' · ' + r.username }),
+        link('Edit', () => { vaultForm.dataset.id = r.id; vaultForm.elements.Site.value = address; vaultForm.elements.Username.value = r.username; vaultForm.elements.Password.focus(); }),
+        link('Reveal', () => vaultAction({ action: 'reveal', id: r.id })),
+        link('Copy for 30 seconds', () => vaultAction({ action: 'copy', id: r.id })),
+        link('Delete', () => { if (confirm('Delete this saved login?')) vaultAction({ action: 'delete', id: r.id }); }));
+    }));
+    return [vaultForm, vaultList];
+  }
+  function vaultReply(m) {
+    if (tab !== 'vault' || !vaultForm) return;
+    if (m.rows) { vaultRows = m.rows; vaultPage(); }
+    if (m.error) return note('Vault request refused.', true);
+    const pending = vaultRequest;
+    if (!pending || m.peer !== pending.peer) return;
+    vaultRequest = null;
+    if (pending.action === 'save' || pending.action === 'delete') {
+      vaultForm.reset(); delete vaultForm.dataset.id;
+      note(pending.action === 'save' ? 'Login saved.' : 'Login deleted.');
+    }
+  }
+  const PANES = { home, memory, planner: plannerPage, meetings: meetingsPage, ...(vaultWindows ? { vault: vaultPage } : {}), abilities: abilitiesPage, model: modelPage, appearance: appearancePage, speaking: speakingPage, listening: listeningPage, shortcuts: shortcutsPage, general: generalPage, about: aboutPage, whatsnew: whatsNewPage };
   // focusKey: what to focus after (a data-k, or an element id); otherwise whatever had focus keeps it.
   function render(focusKey, animate = false) {
     if (!state) return;
@@ -1409,6 +1478,7 @@
     if (!Object.hasOwn(PANES, name)) name = name === 'settings' ? 'model' : 'home';
     const changed = name !== tab;
     if (!changed && !focus) return;
+    if (changed && tab === 'vault') resetVault();
     tab = name;
     disarm(); ui.key = null; ui.rec = null;
     for (const t of TABS) {
@@ -1491,6 +1561,7 @@
     render(null, true);
   };
   window.__panelShut = () => {
+    resetVault();
     disarm(); ui.key = null; unarmQuit();
     body.classList.remove('opening');
     if (REDUCED.matches) { body.classList.add('shut'); return; }
@@ -1506,6 +1577,7 @@
   }, true);
 
   window.__panel = (m) => {
+    if (m.kind === 'vault') return void vaultReply(m);
     if (m.kind === 'state') {
       const first = !state; state = m.state;
       if (ui.arm && !document.querySelector(`[data-k="${CSS.escape(ui.arm)}"]`)) ui.arm = null;

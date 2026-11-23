@@ -58,6 +58,7 @@ import { SLOTS, isSetting, resolveEffort } from './effort.mjs';
 import { pickNotch } from './notch.mjs';
 import { DEFAULT_VOICE, FISH_CHOICES } from './fish.mjs';
 import { GEMINI_CHOICES, GEMINI_DEFAULT_VOICE, GEMINI_LOOK_VOICES, GEMINI_MODEL, GEMINI_VOICES } from './gemini.mjs';
+import { createVault } from './vault.mjs';
 import { createSecrets, retryLoad, runInput } from './secrets.mjs';
 import { showTrayIcon } from './wintray.mjs';
 import { createActivity } from './activity.mjs';
@@ -264,6 +265,7 @@ const googleSync = createGoogleSync({
 let voiceProblemAt = 0;
 // Beats made on this computer (a Gemini voice's, or a Fish voice the app doesn't ship) are kept, so each voice
 // and model's are only made once.
+const vault = process.platform === 'win32' ? createVault({ secrets, dataDir: DATA_DIR, hands: process.env.ROAMIES_HANDS }) : null;
 const BEAT_DIR = path.join(DATA_DIR, 'beats');
 const speech = createSpeaker({
   beatStore: { read: (name) => readJson(path.join(BEAT_DIR, `${name}.json`)), write: (name, data) => writeJson(path.join(BEAT_DIR, `${name}.json`), data) },
@@ -684,6 +686,7 @@ const meetingToolNames = new Set(localMeetingTools.map((t) => t.name));
 let turnVoice = null;
 const commitmentsChanged = (c) => { menu(); scheduleReminders(); showList({ flash: c?.id, seconds: 6 }); syncSoon(); };
 const { tools, hands, whereNow, frontNow: frontData, frontBounds, ink, nextTurn } = createTools({
+  vault,
   focus: HANDS_OK ? { start: (m, t, id) => startFocus(m, t, id), stop: () => stopFocus() } : null,
   firedReminders: () => firedReminders,
   allowActions: () => config.allowActions, skipAllow: () => !!config.allowActions && !!config.skipAllow, ui, ask, openUrl, userName,
@@ -1013,7 +1016,7 @@ function makeAgent(cc) {
     model: config.model,
     system: system(),
     priorMessages: prior,
-    tools: config.lite ? tools.filter((t) => LITE_TOOLS.has(t.name) || PLANNER_TOOLS.has(t.name) || meetingToolNames.has(t.name)) : tools,
+    tools: config.lite ? tools.filter((t) => LITE_TOOLS.has(t.name) || PLANNER_TOOLS.has(t.name) || meetingToolNames.has(t.name) || ['list_logins', 'fill_login'].includes(t.name)) : tools,
     maxTurns: config.lite ? LITE_TURNS : 24,
     transformContext: (msgs, o) => {
       const fitted = fitContext(msgs, { budgetTokens: requestBudget(), force: o?.force });
@@ -2410,6 +2413,7 @@ function panelState() {
   const mine = userDefault(config, routed, defaultPick), current = getModel(mine.model);
   const doing = activity.doing();
   return {
+    vaultKey: vault?.publicKey,
     version: VERSION, whatsNewFrom: config.whatsNewFrom ?? null, os: MAC ? 'mac' : process.platform === 'win32' ? 'win' : LINUX ? 'linux' : 'other', snap: SNAP_OK,
     // Wayland: shortcuts are commands bound in the desktop's settings (bind), and there's no Cursor size.
     wayland: WAYLAND, bind: HOTKEYS_OK ? null : BIND,
@@ -3084,6 +3088,13 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   let m;
   try { m = JSON.parse(line); } catch { return; }
   if (m.type === 'menu') onMenu(m.id, m.via).catch((e) => console.error('menu', e));
+  else if (m.type === 'panel_vault' && panelOpen && vault && m.channel === vault.publicKey) {
+    const reply = (msg) => panelOpen && send({ type: 'panel', msg: { kind: 'vault', peer: m.peer, ...msg } });
+    (async () => {
+      if (m.box) await vault.panel(m);
+      reply({ rows: await vault.list() });
+    })().catch(() => reply({ error: true }));
+  }
   else if (m.type === 'planner' && typeof m.op === 'string') plannerFromPanel(m.op, m.data).catch((e) => console.error('planner', e));
   else if (m.type === 'panel_open') { panelOpen = true; panelAt = Date.now(); logLine('panel_open', {}); if (VOICE_OK) send({ type: 'voice_mics' }); if (meetings) meetingsChanged(); Promise.all([refreshAuth(), signedIn.get('local') && syncLocal(), tts().local && speech.checkLocal()]).catch(() => {}).finally(() => { panel(); refreshCatalogs(); }); }
   else if (m.type === 'meeting_panel') meetingPanel(m);

@@ -137,16 +137,17 @@ impl Node {
         let r = unsafe { el.CachedBoundingRectangle() }.ok().and_then(|r| u.pt(r));
         let s = |p| cached_str(&el, p);
         let b = |p| cached_bool(&el, p);
+        let password = b(UIA_IsPasswordPropertyId);
         Node {
             ct,
             name: s(UIA_NamePropertyId),
             help: s(UIA_HelpTextPropertyId),
-            value: s(UIA_ValueValuePropertyId),
+            value: if password { String::new() } else { s(UIA_ValueValuePropertyId) },
             r,
             enabled: b(UIA_IsEnabledPropertyId),
             focused: b(UIA_HasKeyboardFocusPropertyId),
             focusable: b(UIA_IsKeyboardFocusablePropertyId),
-            password: b(UIA_IsPasswordPropertyId),
+            password,
             val_avail: b(UIA_IsValuePatternAvailablePropertyId),
             val_ro: b(UIA_ValueIsReadOnlyPropertyId),
             invoke: b(UIA_IsInvokePatternAvailablePropertyId),
@@ -433,6 +434,7 @@ pub fn set_value(el: &IUIAutomationElement, text: &str) -> bool {
 /// What a field shows now: its value, else its document text.
 pub fn value(el: &IUIAutomationElement) -> String {
     unsafe {
+        if el.CurrentIsPassword().is_ok_and(|b| b.as_bool()) { return String::new(); }
         if let Ok(v) = el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId).and_then(|p| p.CurrentValue()) {
             return v.to_string();
         }
@@ -472,6 +474,7 @@ pub fn browser_address(w: &Win) -> Option<String> {
         let root = uia().a.ElementFromHandle(hwnd(w.id)).ok()?;
         let cond = uia().a.CreatePropertyCondition(UIA_ControlTypePropertyId, &i4(CT_EDIT)).ok()?;
         let bar = root.FindFirst(TreeScope_Descendants, &cond).ok()?;
+        if bar.CurrentIsPassword().ok()?.as_bool() { return None; }
         let v = bar.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId).ok()?.CurrentValue().ok()?.to_string();
         let v = v.trim();
         if v.is_empty() || v.contains(char::is_whitespace) {

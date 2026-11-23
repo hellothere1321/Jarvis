@@ -99,6 +99,22 @@ pub fn is_browser(exe: &str) -> bool {
     BROWSER_EXES.contains(&exe.to_lowercase().as_str())
 }
 
+// The document supplies the scheme even when the browser hides it in the address bar.
+pub fn vault_address_matches(document: &str, bar: &str) -> bool {
+    let Some(rest) = document.strip_prefix("https://").or_else(|| document.strip_prefix("http://")) else { return false };
+    !bar.is_empty() && [Some(document), Some(rest), rest.strip_prefix("www.")].into_iter().flatten()
+        .any(|s| s == bar || s.strip_suffix('/') == Some(bar))
+}
+
+#[test]
+fn vault_bar_agrees_with_document() {
+    assert!(vault_address_matches("https://example.test/", "example.test"));
+    assert!(vault_address_matches("https://www.example.test/login", "example.test/login"));
+    assert!(!vault_address_matches("http://example.test/", "https://example.test"));
+    assert!(!vault_address_matches("file:///example.test", "example.test"));
+    assert!(!vault_address_matches("https://example.test.evil.test/", "example.test"));
+}
+
 /// Fuzzy app match: "browser" finds a known browser; otherwise a case-insensitive match on the app's name or its
 /// program's file name ("notepad", "msedge").
 pub fn app_matches(app: &str, exe: &str, want: &str) -> bool {

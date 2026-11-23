@@ -3,6 +3,27 @@ import assert from 'node:assert/strict';
 import { ASK, BLOCK, SAFE, checkDrawAction, checkLink, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isPrivateAddress, isYes, splitCommand } from '../safety.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
+import { checkFill, loginOrigin } from '../safety.mjs';
+
+{
+  const entry = loginOrigin('https://example.test');
+  for (const url of ['https://example.test/path', 'HTTPS://EXAMPLE.TEST:443', 'https://www.example.test'])
+    assert.ok(checkFill(url, entry), url);
+  for (const url of ['http://example.test', 'https://example.test:444', 'https://sub.example.test', 'https://examp1e.test',
+    'https://example.test.evil.test', 'https://evil-example.test', 'https://exаmple.test', 'https://user@example.test',
+    'https://@example.test', 'https://example.test.', 'data:text/plain,example.test', 'javascript:void(0)', 'file://example.test'])
+    assert.equal(checkFill(url, entry), false, url);
+  const matches = (front, saved) => checkFill(front, loginOrigin(saved));
+  assert.ok(matches('https://example.test', 'https://www.example.test'));
+  assert.ok(!matches('https://example.test', 'https://sub.example.test'));
+  assert.ok(matches('http://example.test:8080', 'http://example.test:8080'));
+  assert.ok(matches('https://127.0.0.1', 'https://127.0.0.1'));
+  assert.ok(matches('https://[::1]', 'https://[::1]'));
+  assert.ok(!matches('https://www.127.0.0.1', 'https://127.0.0.1'));
+  assert.ok(!matches('https://127.1', 'https://127.0.0.1'));
+  assert.ok(matches('https://xn--bcher-kva.test', 'https://bücher.test'));
+  assert.equal(checkRead('~/Roamies/Data/vault.json', '/home/test').level, BLOCK);
+}
 import nodePath from 'node:path';
 
 const HOME = '/Users/ken';

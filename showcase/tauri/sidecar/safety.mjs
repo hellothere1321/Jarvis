@@ -2,6 +2,7 @@
 // Pure functions so every rule is tested (test/safety.test.mjs). When unsure, ask; never guess "safe".
 import dns from 'node:dns/promises';
 import fs from 'node:fs';
+import { isIP } from 'node:net';
 import nodePath from 'node:path';
 // Rules work on forward-slash paths everywhere, so a Windows path (C:\Users\ken\.ssh) meets the same checks.
 const path = nodePath.posix;
@@ -11,11 +12,33 @@ const isAbs = (p) => p.startsWith('/') || /^[a-z]:\//i.test(p);
 export const SAFE = 'safe', ASK = 'ask', BLOCK = 'block';
 const verdict = (level, reason = '') => ({ level, reason });
 
+// Require an explicit network address. URL otherwise repairs ambiguous separators and IP spellings.
+export function loginOrigin(address) {
+  if (typeof address !== 'string' || /[\\\s\x00-\x1f\x7f]/u.test(address)) return null;
+  const raw = /^https?:\/\/(\[[^\]]+\]|[^:/?#]+)(?::\d+)?(?:[/?#]|$)/i.exec(address);
+  if (!raw || /[@%]/.test(raw[1])) return null;
+  try {
+    const u = new URL(address);
+    if (u.hostname.endsWith('.') || u.hostname.split('.').includes('') || u.username || u.password) return null;
+    if (isIP(u.hostname.replace(/^\[|\]$/g, '')) && raw[1].toLowerCase() !== u.hostname) return null;
+    return { site: u.hostname, scheme: u.protocol.slice(0, -1), port: u.port };
+  } catch { return null; }
+}
+
+export function checkFill(address, entry) {
+  const u = loginOrigin(address);
+  if (!u || u.scheme !== entry.scheme || u.port !== entry.port) return false;
+  if (u.site === entry.site) return true;
+  const base = (host) => host.replace(/^www\./, '');
+  const bare = base(u.site);
+  return bare.includes('.') && !isIP(bare) && bare === base(entry.site);
+}
+
 // Secrets: keys, tokens, passwords, browser cookies and the keychain. Never read, never sent anywhere.
 const SECRET = [
   /(^|\/)\.ssh(\/|$)/, /(^|\/)\.gnupg(\/|$)/, /(^|\/)\.aws(\/|$)/, /(^|\/)\.azure(\/|$)/, /(^|\/)\.kube\/config$/,
   /(^|\/)\.docker\/config\.json$/, /(^|\/)\.netrc$/, /(^|\/)\.npmrc$/, /(^|\/)\.pypirc$/, /(^|\/)\.git-credentials$/,
-  /(^|\/)\.config\/gh(\/|$)/, /(^|\/)\.config\/gcloud(\/|$)/, /(^|\/)\.gg\/auth\.json$/, /(^|\/)Roamies\/Data\/secrets\.json$/i, /(^|\/)\.tauri(\/|$)/,
+  /(^|\/)\.config\/gh(\/|$)/, /(^|\/)\.config\/gcloud(\/|$)/, /(^|\/)\.gg\/auth\.json$/, /(^|\/)Roamies\/Data\/(?:secrets\.json|vault\.json(?:\.[\w-]+\.tmp)?)$/i, /(^|\/)\.tauri(\/|$)/,
   /(^|\/)Library\/Keychains(\/|$)/, /(^|\/)Library\/Cookies(\/|$)/, /\/(Cookies|Login Data|Web Data)(-journal)?$/,
   /(^|\/)\.env(\.[\w-]+)?$/, /\.(pem|p12|pfx|key|keystore|jks)$/i, /(^|\/)id_(rsa|ed25519|ecdsa|dsa)(\.pub)?$/,
   /(^|\/)\.(bash|zsh|fish)_history$/, /(^|\/)\.zsh_sessions(\/|$)/,

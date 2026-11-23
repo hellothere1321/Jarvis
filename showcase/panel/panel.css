@@ -215,6 +215,9 @@ html, body { height: 100%; background: transparent; }
   min-height: 32px; padding: 6px 0; border-bottom: 1px dashed var(--line);
 }
 .item:last-child { border-bottom: 0; }
+.item.vault-login { display: flex; flex-wrap: wrap; justify-content: flex-start; }
+.vault-login > span { flex-basis: 100%; overflow-wrap: anywhere; }
+#pane-vault input[type=password]::-ms-reveal { display: none; }
 .item .text { min-width: 0; font-size: var(--t-body); line-height: 1.35; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item .meta { font-size: var(--t-small); line-height: 1.3; color: var(--ink-3); white-space: nowrap; }
 .item .text small { display: block; font-size: var(--t-small); line-height: 1.3; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; }

@@ -66,7 +66,13 @@ export function createSecrets({ platform = process.platform, hands = '', dataDir
 
   // Encrypted blobs (Windows) or, in test runs only, plain values: one JSON file, owner-only.
   const fileStore = (file, seal, unseal, kind) => {
-    const read = async () => { try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return {}; } };
+    const read = async () => { try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch (e) { if (e.code === 'ENOENT') return {}; throw new Error('secret store unavailable'); } };
+    let pending = Promise.resolve();
+    const update = (fn) => {
+      const done = pending.then(fn);
+      pending = done.catch(() => {});
+      return done;
+    };
     const write = async (all) => {
       await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
       const tmp = `${file}.${process.pid}.tmp`;
@@ -76,8 +82,8 @@ export function createSecrets({ platform = process.platform, hands = '', dataDir
     return {
       kind,
       async get(name) { check(name); const v = (await read())[name]; return v == null ? null : unseal(v); },
-      async set(name, value) { check(name); const all = await read(); all[name] = await seal(value); await write(all); },
-      async delete(name) { check(name); const all = await read(); if (name in all) { delete all[name]; await write(all); } },
+      async set(name, value) { check(name); return update(async () => { const all = await read(); all[name] = await seal(value); await write(all); }); },
+      async delete(name) { check(name); return update(async () => { const all = await read(); if (name in all) { delete all[name]; await write(all); } }); },
     };
   };
 

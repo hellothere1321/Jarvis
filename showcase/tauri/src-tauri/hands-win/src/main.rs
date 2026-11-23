@@ -35,6 +35,8 @@ mod select;
 mod uia;
 #[cfg(windows)]
 mod win;
+#[cfg(windows)]
+mod vault;
 
 use serde_json::{json, Value};
 use std::io::Write;
@@ -92,6 +94,8 @@ fn windows_main(cmd: &str, args: &[String]) -> ! {
     }
     let arg = |i: usize| args.get(i).map(String::as_str);
     match cmd {
+        "vault-front" => out(vault::front().unwrap_or(json!({"ok":false}))),
+        "vault-fill" => out(json!({"ok":vault::fill().is_some()})),
         "--smoke" => smoke::run(),
         "trusted" | "guide" | "screencheck" => out(json!({ "ok": false, "unsupported": true, "error": "Not needed on Windows." })),
         "windows" => {
