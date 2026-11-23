@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { AGENT_TYPES, SCREEN_TOOLS, agentNews, agentSystem, canNudge, checkFinish, createAgents, folderName, holdAfterLaunch, liveAgentsText, newsDesk, newsText, toolsFor, wantsAgent } from '../agents.mjs';
+import { AGENT_TYPES, DEFAULT_RETURNS, SCREEN_TOOLS, agentNews, agentSystem, canNudge, checkFinish, createAgents, folderName, holdAfterLaunch, liveAgentsText, newsDesk, newsText, toolsFor, wantsAgent, wantsWidgetBuild, widgetPath } from '../agents.mjs';
 import { checkLink, checkOpen, checkRead, checkWrite } from '../safety.mjs';
 
 const day = new Date(2026, 10, 13, 14, 5);
@@ -28,6 +28,13 @@ for (const t of ['send an agent to make me a landing page for my dog brand', 'Ca
 for (const t of ['what is an AI agent?', 'how do I create an agent in LangChain', 'my travel agent called', 'what is in the background of this photo',
   'call my agent', 'explain how agents work', 'the agent sent me an email', 'is it possible to send an agent?', ''])
   assert.ok(!wantsAgent(t), `not a request for one: ${t}`);
+
+assert.equal(DEFAULT_RETURNS.maker, 'widget');
+assert.ok(wantsWidgetBuild('make a tax calculator for a business'));
+assert.ok(wantsWidgetBuild('Could you please build me a small game?'));
+for (const text of ['Calculate tax for a business', 'How do I build a calculator?', 'Build a calculator website', 'Make a widget and save it as a file']) {
+  assert.equal(wantsWidgetBuild(text), false, text);
+}
 
 // Tools: never the screen or the user's lists.
 const all = ['take_screenshot', 'read_file', 'write_file', 'run_command', 'web_search', 'web_fetch', 'list_files', 'search_files', 'draw', 'act_in_app', 'open', 'remember_commitment'].map((name) => ({ name }));
@@ -107,6 +114,35 @@ assert.deepEqual(toolsFor('hacker', all), [], 'an unknown type gets nothing');
   fs.rmSync(root, { recursive: true, force: true });
 }
 
+// Widgets have one fixed, bounded HTML result. Redirected paths cannot leave the agent folder.
+{
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'roamies-widget-')));
+  try {
+    const dir = path.join(root, 'agent'), out = path.join(root, 'other'), widget = path.join(dir, 'files', 'widget.html');
+    fs.mkdirSync(path.dirname(widget), { recursive: true });
+    const finishWidget = () => checkFinish({ outcome: 'Built a calculator.' }, { dir, returns: 'widget' });
+    assert.match(finishWidget().error, /files\/widget\.html/);
+    fs.writeFileSync(widget, '<p>Calculator</p>');
+    assert.equal(widgetPath(dir), widget);
+    assert.equal(widgetPath(dir, { read: () => ({ level: 'block' }) }), null);
+    assert.equal(finishWidget().result.widget, true);
+    assert.deepEqual(finishWidget().result.files, [], 'a widget has no browser file tile');
+    fs.writeFileSync(widget, Buffer.alloc(2 * 1024 * 1024 + 1));
+    assert.equal(widgetPath(dir), null, 'oversized HTML is rejected');
+    fs.unlinkSync(widget);
+    fs.mkdirSync(widget);
+    assert.equal(widgetPath(dir), null, 'a directory is rejected');
+    fs.mkdirSync(out);
+    fs.writeFileSync(path.join(out, 'widget.html'), '<p>Outside the agent</p>');
+    const linked = path.join(root, 'linked');
+    fs.mkdirSync(linked);
+    fs.symlinkSync(out, path.join(linked, 'files'), process.platform === 'win32' ? 'junction' : 'dir');
+    assert.equal(widgetPath(linked), null, 'a linked files directory cannot point outside the agent');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 // Its prompt: its folder, plan and finish, and the safety line.
 for (const type of AGENT_TYPES) {
   const s = agentSystem(type, { dir: '/x/job', userName: 'Ken', deliverTo: '~/Desktop' });
@@ -123,7 +159,11 @@ assert.ok(!/files\/notes\.md/.test(agentSystem('researcher', { dir: '/x' })), 'a
 assert.match(agentSystem('researcher', { dir: '/x', returns: 'files' }), /files\/notes\.md/);
 assert.match(agentSystem('researcher', { dir: '/x', userName: 'Ken' }), /Ken wants an answer, not a file[^\n]*use files\/ only if the brief asks for a file/);
 assert.match(agentSystem('organizer', { dir: '/x' }), /work\/plan\.md[^\n]*report says what moved where; place is the folder you tidied/);
-assert.match(agentSystem('maker', { dir: '/x', userName: 'Ken' }), /Ken asked for something made/);
+const makerWidgetPrompt = agentSystem('maker', { dir: '/x' });
+assert.match(makerWidgetPrompt, /files\/widget\.html.*inline CSS and JavaScript/);
+assert.match(makerWidgetPrompt, /offline in a sandbox/);
+assert.doesNotMatch(makerWidgetPrompt, /index\.html/);
+assert.match(agentSystem('maker', { dir: '/x', returns: 'files' }), /self-contained index\.html/);
 assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is what you found or did/);
 
 // The inbox: untold news, asks first; stopped ones never; ended before this launch is old.
@@ -230,7 +270,7 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'roamies-agentmgr-')));
   const root = path.join(home, 'Roamies');
   let T = new Date(2026, 10, 13, 14, 5).getTime();
-  const children = [], events = [], opened = [], revealed = [];
+  const children = [], events = [], opened = [], revealed = [], widgets = [];
   const fork = (runner, args, opts) => {
     const c = new EventEmitter();
     Object.assign(c, { runner, opts, sent: [], connected: true, signals: [], send(m) { c.sent.push(m); }, kill(sig) { c.signals.push(sig); if (sig === 'SIGTERM' && !c.stubborn) setImmediate(() => c.emit('close', null, sig)); } });
@@ -241,7 +281,7 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   const config = {
     model: async () => ({ provider, model: 'm1', route: 'api' }), creds: async () => ({ accessToken: 'k', accountId: 'acc' }),
     allowActions: () => allow, image: () => ({ type: 'image', mediaType: 'image/png', data: Buffer.from('png').toString('base64') }),
-    open: async (p) => opened.push(p), reveal: async (p) => revealed.push(p),
+    open: async (p) => opened.push(p), reveal: async (p) => revealed.push(p), openWidget: async (w) => widgets.push(w),
   };
   // macOS keeps temp folders under /private/var, a system path to checkOpen: the rule sees them under a plain home.
   const openRule = (p, h, o) => checkOpen(String(p).replace(home, '/Users/ken'), '/Users/ken', o);
@@ -254,7 +294,10 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
 
   // Starting: its folder, its process, its row.
   fs.writeFileSync(path.join(home, 'logo.png'), 'img');
-  const a = await mgr.start({ type: 'maker', title: 'Dog brand landing page', brief: 'Make a landing page for Woof Co.', inputs: ['snap', '~/logo.png'] });
+  const makerTool = mgr.tools.find((tool) => tool.name === 'send_agent');
+  assert.match(makerTool.description, /calculator.*returns widget/);
+  assert.match(makerTool.description, /returns files.*app, website, web page/);
+  const a = await mgr.start({ type: 'maker', title: 'Dog brand landing page', brief: 'Make a landing page for Woof Co.', inputs: ['snap', '~/logo.png'], returns: 'files' });
   assert.equal(a.folder, '2026-11-13 Dog brand landing page');
   for (const sub of ['files', 'work', 'inputs']) assert.ok(fs.statSync(path.join(a.dir, sub)).isDirectory(), sub);
   assert.ok(fs.existsSync(path.join(a.dir, 'inputs', 'logo.png')), 'its inputs are copied in');
@@ -266,7 +309,7 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   assert.equal(startMsg.agent.dir, a.dir);
   assert.equal(startMsg.model.model, 'm1');
   assert.equal(startMsg.content.filter((p) => p.type === 'image').length, 2, 'pictures ride along');
-  assert.equal(startMsg.agent.returns, 'files', 'a maker returns files');
+  assert.equal(startMsg.agent.returns, 'files', 'an explicit website returns files');
   assert.equal(mgr.get(a.id).told, true, 'nothing to tell while it works');
   assert.match(startMsg.content[0].text, /Make a landing page for Woof Co\./);
   assert.equal(lastOf('launch').agent.id, a.id);
@@ -401,6 +444,22 @@ assert.match(agentSystem('maker', { dir: '/x', returns: 'answer' }), /report is 
   assert.equal(fs.readFileSync(path.join(desk, 'card 2.txt'), 'utf8'), 'made');
   assert.ok(await mgr.openFile(g.id, path.join(desk, 'card 2.txt')), 'its delivered copy opens too');
   await assert.rejects(mgr.start({ type: 'maker', title: 'x', brief: 'x', deliver_to: '~/.ssh' }), /Can't deliver/);
+  const w = await mgr.start({ type: 'maker', title: 'Calculator', brief: 'Make a tax calculator.' });
+  const worker = children.at(-1);
+  assert.equal(worker.sent[0].agent.returns, 'widget');
+  assert.equal(await mgr.openWidget(w.id), false, 'it cannot open while working');
+  fs.writeFileSync(path.join(w.dir, 'files', 'widget.html'), '<h1>Tax calculator</h1>');
+  const widgetResult = checkFinish({ outcome: 'Built a tax calculator.' }, { dir: w.dir, returns: w.returns }).result;
+  worker.emit('message', { t: 'finish', result: widgetResult }); worker.emit('message', { t: 'end', ok: true }); worker.emit('close', 0, null);
+  await until(() => widgets.length === 1);
+  const widgetMessage = { id: w.id, title: w.title, folder: w.folder };
+  assert.deepEqual(widgets, [widgetMessage], 'opens automatically after success');
+  assert.equal(lastOf('done').agent.result.widget, true, 'the shelf gets a widget chip');
+  assert.equal(await mgr.openFile(w.id, 'files/widget.html'), false, 'it cannot open in the browser');
+  assert.equal(await mgr.openWidget(w.id), true);
+  assert.deepEqual(widgets, [widgetMessage, widgetMessage], 'the chip reopens through the native widget route');
+  fs.unlinkSync(path.join(w.dir, 'files', 'widget.html'));
+  assert.equal(await mgr.openWidget(w.id), false, 'missing widgets cannot reopen');
   // Next launch: one still marked working was cut off when Roamies closed.
   const live = await mgr.start({ type: 'maker', title: 'Cut off', brief: 'x' });
   mgr.stopAll();

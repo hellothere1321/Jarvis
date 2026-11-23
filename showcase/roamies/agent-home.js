@@ -14,11 +14,12 @@
   };
   // The made panel's open button: where it worked (a folder, a file, a page), else its files; null for neither.
   R.agentOpenLabel = (result) => {
+    if (result?.widget) return 'Open widget';
     const kind = result?.place?.kind;
     if (kind) return { folder: 'Open folder', file: 'Open file', url: 'Open page' }[kind] ?? null;
     return result?.files?.length ? 'Open folder' : null;
   };
-  if (typeof document === 'undefined') return;
+  if (typeof document === 'undefined' || window.ROAMIE_AGENT_HOME === 'separate') return;
 
   const css = `
 .ah-col { position: fixed; left: 0; top: 0; z-index: 5; width: 300px; display: flex; flex-direction: column; gap: 8px; pointer-events: none; will-change: transform; }
@@ -357,7 +358,7 @@
       const foot = mk('div', 'ahs-foot'), open = mk('button', 'ahs-chip', label);
       open.type = 'button';
       if (a.result?.place?.name) open.title = a.result.place.name;
-      open.addEventListener('click', () => send({ type: 'agent_folder', id: a.id }));
+      open.addEventListener('click', () => send({ type: a.result?.widget ? 'agent_widget' : 'agent_folder', id: a.id }));
       foot.append(open);
       if (!files.length) foot.style.paddingTop = '10px';
       inner.append(foot);
@@ -456,6 +457,11 @@
   // ---------- events from the sidecar ----------
   const api = {
     send: null,
+    hit(x, y) {
+      // Match the browser's current hit target, including clipping and in-flight shelf positions.
+      return !!document.elementFromPoint(x, y)?.closest('.ah.on, .ahs.on');
+    },
+    place() { place(); },
     hatch(at) { mount(); startHatch(at); },
     hatchOff: endHatch,
     event(e, { from = null } = {}) {

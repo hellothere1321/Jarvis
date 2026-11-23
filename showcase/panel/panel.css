@@ -152,8 +152,9 @@ html, body { height: 100%; background: transparent; }
 .pane { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; gap: var(--group); padding: 12px 0 var(--gut); }
 .pane.paged { padding-bottom: 0; }
 .pane:not(.paged) { overflow-y: auto; margin-inline-end: calc(-1 * var(--gut)); padding-inline-end: var(--gut); }
-/* In a page that scrolls, a list keeps the height its rows need instead of shrinking to the room that is left. */
-.pane:not(.paged) .group.paged, .pane:not(.paged) .pagebox { flex: none; }
+/* In a page that scrolls, a list keeps the height its rows need instead of shrinking to the room that is left.
+   The same goes for a tab's sections: the next group must follow them, not sit on their overflowing rows. */
+.pane:not(.paged) .group.paged, .pane:not(.paged) .pagebox, .pane:not(.paged) .tabpanel { flex: none; }
 .pane[hidden] { display: none; }
 /* A paged list takes the room left and shows as many rows as fit there (panel.js measures). */
 .group.paged { flex: 1; min-height: 0; display: flex; flex-direction: column; }

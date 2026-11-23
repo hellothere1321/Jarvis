@@ -34,7 +34,7 @@ const ended = () => new Promise((resolve, reject) => {
   onEnd = (e) => { clearTimeout(t); onEnd = null; resolve(e); };
 });
 const done = ended();
-const a = await mgr.start({ type: 'maker', title: 'Dog brand landing page', brief: 'Make a landing page for Woof Co.' });
+const a = await mgr.start({ type: 'maker', title: 'Dog brand landing page', brief: 'Make a landing page for Woof Co.', returns: 'files' });
 const end = await done;
 const log = fs.readFileSync(process.env.FAKE_LOG, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
 

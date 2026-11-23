@@ -48,6 +48,7 @@ assert.ok(/canvas\s*\{[^}]*position:\s*fixed/.test(fs.readFileSync(new URL('../.
 assert.ok(/\.ah-mini, \.ahs-mini \{[^}]*position: static/.test(homeSrc), 'minis stay in flow');
 // The made panel's open button: where it worked when it said so, else its files, else none.
 const label = window.Roamie.agentOpenLabel;
+assert.equal(label({ outcome: 'Made it.', widget: true, files: [] }), 'Open widget');
 assert.equal(label({ outcome: 'x', files: [{ name: 'a.md' }], place: null }), 'Open folder');
 assert.equal(label({ outcome: 'x', files: [], place: { kind: 'folder', name: 'Downloads' } }), 'Open folder');
 assert.equal(label({ outcome: 'x', files: [], place: { kind: 'file', name: 'a.pdf' } }), 'Open file');
@@ -55,4 +56,35 @@ assert.equal(label({ outcome: 'x', files: [{ name: 'a.md' }], place: { kind: 'ur
 assert.equal(label({ outcome: 'Found it.', files: [], place: null }), null, 'an answer with nowhere to go: no button');
 assert.equal(label(null), null);
 assert.ok(/\.ahs-out, \.ahs-need \{[^}]*white-space: nowrap; overflow: hidden; text-overflow: ellipsis/.test(homeSrc), 'the outcome stays on one line');
+
+// The Windows corner receives queued agent events even without a Roamie tile. Shelf movement updates
+// click-through using the current hit target even if the physical cursor has not moved.
+const calls = [], events = [];
+const launch = { type: 'launch', agent: { id: 'a' } };
+let hit = false, refresh;
+const corner = {
+  ROAMIE_AGENT_HOME: 'corner',
+  __roamieCornerInbox: [{ kind: 'agents', e: launch }],
+  __TAURI__: { core: { invoke: (cmd, args) => { calls.push([cmd, args]); return Promise.resolve(); } } },
+};
+const Roamie = { agentHome: {
+  event: (...args) => events.push(args),
+  hit: (x, y) => hit && x === 1200 && y === 24,
+} };
+vm.runInNewContext(fs.readFileSync(new URL('../../../roamies/host.js', import.meta.url), 'utf8'), {
+  window: corner, Roamie, setInterval: (fn) => { refresh = fn; },
+});
+assert.deepEqual(events, [[launch]], 'the corner can launch without a sidekick position');
+corner.__roamiePtr(1200, 24);
+hit = true;
+refresh();
+corner.__roamieHost({ kind: 'hands', on: true });
+corner.__roamieHost({ kind: 'hands', on: false });
+hit = false;
+refresh();
+assert.deepEqual(calls.filter(([cmd]) => cmd === 'set_hot').map(([, args]) => args.hot), [false, true, false, true, false]);
+const dismiss = { type: 'agent_dismiss', id: 'a' };
+Roamie.agentHome.send(dismiss);
+assert.equal(calls.at(-1)[0], 'sidecar_send');
+assert.equal(calls.at(-1)[1].msg, dismiss);
 console.log('agenthome tests: passed');

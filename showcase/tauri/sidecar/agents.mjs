@@ -7,16 +7,18 @@ import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import { askedLine, exactWords, userWordsBlock, withWords } from './quote.mjs';
+import { checkRead } from './safety.mjs';
 import { roamiesRoot } from './store.mjs';
 import { withRole } from './subagents.mjs';
 
 // ~/Roamies (datadir.mjs): one visible folder, so no macOS privacy prompt; ROAMIES_DATA_DIR moves it for tests.
 export const agentsRoot = roamiesRoot;
 export const AGENT_TYPES = ['maker', 'researcher', 'organizer'];
-// What it hands back: files when something was asked to be made, a written answer (to the chat) otherwise.
-export const RETURNS = ['files', 'answer'];
-export const DEFAULT_RETURNS = { maker: 'files', researcher: 'answer', organizer: 'answer' };
-const returnsOf = (a) => (RETURNS.includes(a?.returns) ? a.returns : DEFAULT_RETURNS[a?.type] ?? 'files');
+export const RETURNS = ['files', 'answer', 'widget'];
+export const DEFAULT_RETURNS = { maker: 'widget', researcher: 'answer', organizer: 'answer' };
+const ordinaryReturns = (type) => type === 'maker' ? 'files' : DEFAULT_RETURNS[type] ?? 'files';
+// Saved runs without a return mode predate widgets.
+const returnsOf = (a) => RETURNS.includes(a?.returns) ? a.returns : ordinaryReturns(a?.type);
 // Every type works with files, commands and the web; the screen and the user's lists stay the chat's.
 const WORK_TOOLS = ['read_file', 'list_files', 'search_files', 'write_file', 'run_command', 'web_search', 'web_fetch'];
 export const TYPE_TOOLS = { maker: WORK_TOOLS, researcher: WORK_TOOLS, organizer: WORK_TOOLS };
@@ -44,6 +46,12 @@ const ASKS_ABOUT = /^\s*(what|what's|whats|how|why|who|which|when|where|is|are|w
 const START_AGENT = /\b(send|create|start|spawn|launch|spin up|fire up|kick off|get|have|use|deploy|dispatch|set up|make)\s+(?:(?:me|out|off|up)\s+)?(?:an?|another|one|two|three|some|\d+)\s+(?:[\w-]+\s+){0,2}?agents?\b/i;
 const BACKGROUND = /\b(do|run|make|build|write|research|handle|work on|keep going|go|find|tidy|sort)\b[^.?!]{0,60}\bin the background\b|\bbackground agents?\b/i;
 export const wantsAgent = (text) => { const t = String(text ?? ''); return !ASKS_ABOUT.test(t) && (START_AGENT.test(t) || BACKGROUND.test(t)); };
+
+export function wantsWidgetBuild(text) {
+  const t = String(text ?? '').trim();
+  return /^(?:(?:can|could|would|will) you\s+|please\s+)*(?:build|make|create|put together|write)\s+(?:me\s+)?(?:a|an|the)\s+[^.!?\n]{0,70}\b(?:widget|tool|calculator|converter|tracker|timer|stopwatch|game|simulator|counter)\b/i.test(t)
+    && !/\b(?:app|application|website|web\s?page|site|document|slides|picture|file|code|script)\b|\bsave (?:it|that) (?:as|to)\b/i.test(t);
+}
 
 /** The Agents part of the live state: running and waiting ones, and those that ended in the last day. '' when none. */
 export function liveAgentsText(list, { now = Date.now(), userName = 'The user' } = {}) {
@@ -129,6 +137,18 @@ export function newsDesk({ gates, news, markTold, enqueue, say, signedIn, userNa
 }
 
 const realOr = (p) => { try { return fs.realpathSync.native(p); } catch { return null; } };
+const WIDGET_FILE = 'files/widget.html';
+const WIDGET_MAX_BYTES = 2 * 1024 * 1024;
+export function widgetPath(dir, { read = checkRead, home = os.homedir() } = {}) {
+  const target = path.join(dir, WIDGET_FILE);
+  if (read(target, home).level !== 'safe') return null;
+  const real = realOr(target);
+  if (!real || real !== target || read(real, home).level !== 'safe') return null;
+  try {
+    const stat = fs.statSync(real);
+    return stat.isFile() && stat.size > 0 && stat.size <= WIDGET_MAX_BYTES ? real : null;
+  } catch { return null; }
+}
 const within = (a, dir) => !!a && !!dir && (a === dir || a.startsWith(dir + path.sep));
 const expandHome = (p) => String(p).replace(/^~(?=$|\/|\\)/, os.homedir());
 const sameFile = (a, b) => {
@@ -186,6 +206,10 @@ export function checkFinish(args, { dir, deliverTo = null, returns = 'files' } =
   const report = String(args?.report ?? '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
   if (!report && returns === 'answer') return { error: 'report is missing: they asked for an answer, so write what you found or did (answer first, plain text, under 1,200 characters).' };
   if (report.length > REPORT_MAX) return { error: `report is ${report.length} characters; keep it under ${REPORT_MAX}, answer first.` };
+  if (returns === 'widget') {
+    if (!widgetPath(dir)) return { error: `Save a nonempty regular ${WIDGET_FILE} (up to 2 MB) inside your folder before you finish.` };
+    return { result: { outcome, report: report || null, place: null, needs_you: needs || null, files: [], widget: true } };
+  }
   const pl = checkPlace(args?.place, dir);
   if (pl.error) return { error: pl.error };
   const given = Array.isArray(args?.files) ? args.files : [];
@@ -209,18 +233,20 @@ export function checkFinish(args, { dir, deliverTo = null, returns = 'files' } =
 
 /** The system prompt for an agent of this type. */
 export function agentSystem(type, { dir, userName = 'the user', deliverTo = null, returns = DEFAULT_RETURNS[type] ?? 'files', now = new Date() } = {}) {
-  const answer = returns === 'answer';
+  const answer = returns === 'answer', widget = returns === 'widget';
   const how = {
-    maker: 'You make things: documents, web pages, pictures (SVG), code, spreadsheets (CSV) and slides (one HTML file). Make the real, finished thing, never a plan or a placeholder. A web page is one self-contained index.html (CSS and JS inside it, no build step) unless the brief asks for more. Read your files back and check them before you finish.',
+    maker: widget
+      ? 'Make the finished, usable tool as one self-contained files/widget.html, with inline CSS and JavaScript. Roamies opens it in a small desktop window when you finish. Design a compact, responsive dark UI with labeled controls. It runs offline in a sandbox: no network, external assets or scripts, storage APIs, popups, or desktop APIs. Keep any state in memory. Read it back and check it before you finish.'
+      : 'You make things: documents, web pages, pictures (SVG), code, spreadsheets (CSV) and slides (one HTML file). Make the real, finished thing, never a plan or a placeholder. A web page is one self-contained index.html (CSS and JS inside it, no build step) unless the brief asks for more. Read your files back and check them before you finish.',
     researcher: answer
       ? 'You find things out. Search the web and read pages, then finish with the answer in report: the answer first, then the key points, then the sources as links. Keep it short and specific. The outcome you finish with is the one-line answer itself.'
       : 'You find things out. Search the web and read pages, then write the answer to files/notes.md: the answer first, then the key points, then the sources as links. Keep it short and specific. The outcome you finish with is the one-line answer itself.',
     organizer: `You tidy files and folders. Look first, then write every move or rename you plan to work/plan.md, then do the whole batch in one run_command (one mv -n per line), so ${userName} gives one yes for all of it. Never delete anything: put duplicates and junk in a folder named "To check" instead. ${answer ? 'Your report says what moved where; place is the folder you tidied.' : 'Write what you did to files/changes.md.'}`,
   }[type] ?? '';
-  const mode = answer
+  const mode = widget ? `${userName} asked for a tool they can use. Open it through the Roamies widget result by saving it to files/widget.html.` : answer
     ? `${userName} wants an answer, not a file: what you found or did goes in finish's report, which is passed on to them. Notes, plans and downloads go in work/; use files/ only if the brief asks for a file.`
     : `${userName} asked for something made: the finished files are the result.`;
-  const done = answer
+  const done = widget ? `When you're done, call finish once: outcome is one plain sentence under 90 characters. Leave files and place empty: Roamies opens files/widget.html automatically. Include report or needs_you only if ${userName} needs to know something. Then stop.` : answer
     ? `When you're done, call finish once: outcome is one plain sentence under 90 characters; report is what you found or did, in plain text under 1,200 characters, the answer first and complete on its own; place (optional) is the folder, file or http(s) web address you worked on (the folder you tidied, the site you checked); files only if the brief asked for a file (paths from your folder, each with a few words on what it is); needs_you (under 70 characters) only if they must do something. Then stop: finish is all they see.`
     : `When you're done, call finish once: outcome is one plain sentence under 90 characters, files lists what they should open (paths from your folder, each with a few words on what it is), report (optional, under 1,200 characters) only for something they should know, place (optional) only if the result lives somewhere else (a folder, file or http(s) web address), and needs_you (under 70 characters) only if they must do something. Then stop: finish is all they see.`;
   return `You are a background agent working for ${userName} in Roamies, a desktop app. You work alone: nobody reads your messages while you work, and you can't see the screen. The brief is all you know about the request, so do what it says without asking questions.
@@ -256,6 +282,7 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
     workMs: a.workMs + (a.state === 'working' && a.workFrom ? now() - a.workFrom : 0), live: a.state === 'working',
     ask: a.ask ? { question: a.ask.question } : null, reason: a.reason ?? null,
     result: a.result ? { outcome: a.result.outcome, needs_you: a.result.needs_you, files: a.result.files.map((f) => ({ name: f.name, rel: f.rel, what: f.what, dir: !!f.dir })),
+      ...(a.result.widget ? { widget: true } : {}),
       place: a.result.place ? { kind: a.result.place.kind, name: a.result.place.name } : null } : null,
   });
   const tell = (type, a) => ui({ kind: 'agents', e: { type, agent: pub(a) } });
@@ -303,6 +330,8 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
     if (!config.allowActions()) throw new Error(actionsOff);
     if (!AGENT_TYPES.includes(type)) throw new Error(`type must be one of ${AGENT_TYPES.join(', ')}.`);
     if (returns != null && !RETURNS.includes(returns)) throw new Error(`returns must be one of ${RETURNS.join(', ')}.`);
+    if (returns === 'widget' && (type !== 'maker' || (cont && agents.get(String(cont))?.type !== 'maker'))) throw new Error('Only a maker can return a widget.');
+    if (deliverTo) returns = returns === 'widget' || returns == null ? 'files' : returns;
     if (!String(brief ?? '').trim()) throw new Error('The brief is empty: say everything the agent needs, it sees none of this conversation.');
     const md = await config.model(sub ? { spec: sub.spec, slot: sub.slot } : modelName ? String(modelName) : undefined); // a model they named for it, else the usual
     // What they said this turn, verbatim (sidekick.mjs); a scheduled run belongs to no turn.
@@ -327,7 +356,7 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
     } else {
       await fs.promises.mkdir(dirOf, { recursive: true });
       const folder = folderName(title, new Date(now()), await fs.promises.readdir(dirOf).catch(() => []));
-      a = { id: newId(), type, title: one(title, 60) || 'Agent', brief: String(brief), folder, dir: path.join(dirOf, folder), runs: 1, deliverTo: to, delivered: [], returns: returns ?? DEFAULT_RETURNS[type], ...(sub ? { sub: sub.id, subLabel: sub.label } : {}), ...(words ? { request: words } : {}) };
+      a = { id: newId(), type, title: one(title, 60) || 'Agent', brief: String(brief), folder, dir: path.join(dirOf, folder), runs: 1, deliverTo: to, delivered: [], returns: returns ?? (scheduled ? ordinaryReturns(type) : DEFAULT_RETURNS[type]), ...(sub ? { sub: sub.id, subLabel: sub.label } : {}), ...(words ? { request: words } : {}) };
       for (const sub of ['files', 'work', 'inputs']) await fs.promises.mkdir(path.join(a.dir, sub), { recursive: true });
     }
     a.returns = returnsOf(a);
@@ -427,6 +456,9 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
     if (a.state === 'done' && a.deliverTo) await deliver(a);
     await record(a);
     tell(a.state === 'done' ? 'done' : a.state === 'failed' ? 'fail' : 'gone', a);
+    if (a.state === 'done' && a.result.widget) {
+      try { await openWidget(a.id); } catch (e) { log('agent_widget', { id: a.id, error: String(e.message) }); }
+    }
     log('agent_end', { id: a.id, state: a.state, reason: a.reason ?? null, turns: a.turns, in: a.tokens.in, out: a.tokens.out, ms: a.workMs });
   }
   // A copy of each file it made goes where they asked; nothing there is overwritten.
@@ -482,12 +514,19 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
   // its folder instead of run.
   async function openFile(id, rel) {
     const a = agents.get(String(id));
-    if (!a) return false;
+    if (!a || returnsOf(a) === 'widget') return false;
     const r = String(rel ?? '');
     const real = inside(a, path.isAbsolute(r) ? r : path.join(a.dir, r));
     if (!real) return false;
     const v = safety.checkOpen(real, home, { executable: await fs.promises.stat(real).then((s) => s.isFile() && (s.mode & 0o111) !== 0, () => false) });
     if (v.level === 'safe') await config.open(real); else await config.reveal(real);
+    return true;
+  }
+  async function openWidget(id) {
+    const a = agents.get(String(id));
+    if (a?.state !== 'done' || returnsOf(a) !== 'widget' || !a.result?.widget || !config.openWidget) return false;
+    if (!widgetPath(a.dir, { read: safety.checkRead, home })) return false;
+    await config.openWidget({ id: a.id, title: a.title, folder: a.folder });
     return true;
   }
   // Its open button: where it worked when it said (a page, a folder, a file), else what it made.
@@ -530,7 +569,7 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
   const tools = [
     {
       name: 'send_agent',
-      description: `Start a background agent: it works alone in its own folder (~/Roamies/Agents) while you keep talking, shown as a row in the top-right corner. Only when ${userName} asks for an agent or for work in the background, or for long hands-off work (a website, a document or slides, deep research, tidying a folder) after offering it and hearing yes; never for a quick answer or anything on the screen. type: maker (makes files), researcher (finds things out on the web, writes notes), organizer (moves and renames files, one yes for the batch). title: 2 to 5 words. brief: complete, since it sees none of this conversation: what to make or find, for whom, the style, every name and detail as ${userName} gave it (never reword a name or a number), and what done looks like; their exact words are attached for it. subagent: a specialist from the live state's Subagents list (its type and model are then set: leave them out), with a prompt for its own part; one per separate part of a request. model: only when they named one ("use Gemini for it"). inputs: file paths, or "snap" for this request's picture. deliver_to: a folder they named ("on my Desktop" → ~/Desktop). continue: a finished agent's id, to carry on in its folder. returns: files when they asked for something made (a page, document, slides, picture, "save it as…"); answer when they want something found out or done (it reports back to you, with no file); left out: files for a maker, answer otherwise. Once it starts, say nothing more: its launch is your reply.`,
+      description: `Start a background agent when ${userName} asks you to build a tool they can use (calculator, converter, tracker, small game): call this directly with type maker and returns widget, which opens in Roamies automatically. Use returns files when they explicitly ask for an app, website, web page, document, slides, picture, file, or say "save it as…". Do not turn a tool request into a website. Otherwise launch when they ask for an agent or background work, or for long hands-off work after offering it and hearing yes. Never launch for a quick answer or anything on the screen. type: maker (builds widgets or files), researcher (finds things out on the web), organizer (moves and renames files, one yes for the batch). title: 2 to 5 words. brief: complete, since it sees none of this conversation: what to make or find, for whom, the style, every name and detail as ${userName} gave it (never reword a name or a number), and what done looks like; their exact words are attached for it. subagent: a specialist from the live state's Subagents list (its type and model are then set: leave them out), with a prompt for its own part; one per separate part of a request. model: only when they named one ("use Gemini for it"). inputs: file paths, or "snap" for this request's picture. deliver_to: a folder they named ("on my Desktop" → ~/Desktop). continue: a finished agent's id, to carry on in its folder; omit returns to keep its format. returns answer when they want something found out or done (it reports back to you, with no file). For new agents, the default is widget for makers and answer otherwise. Once it starts, say nothing more: its launch is your reply.`,
       parameters: z.object({
         type: z.enum(AGENT_TYPES).optional(), subagent: z.string().max(40).optional(), title: z.string().min(1).max(60), brief: z.string().min(1).max(8000),
         inputs: z.array(z.string().max(500)).max(10).optional(), deliver_to: z.string().max(500).optional(), continue: z.string().max(12).optional(),
@@ -568,7 +607,7 @@ export function createAgents({ fork, ui, config, root, userName = 'The user', ru
   ];
 
   return {
-    tools, loaded, check, stop, answer, openFile, openFolder, dismiss, steer, report,
+    tools, loaded, check, stop, answer, openFile, openFolder, openWidget, dismiss, steer, report,
     start, get: (id) => agents.get(String(id)), list: () => [...agents.values()],
     running: () => running().length,
     news: () => agentNews([...agents.values()], { launchAt }),

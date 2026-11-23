@@ -33,6 +33,7 @@ use voice::{init_hotkeys, set_esc, set_hotkey, start_voice, stop_voice, to_voice
 static GENERATION: AtomicUsize = AtomicUsize::new(0);
 /// The overlay window the sidekick lives in. It moves to whichever screen the cursor is on.
 static SIDEKICK_OVERLAY: Mutex<Option<String>> = Mutex::new(None);
+const AGENT_HOME_OVERLAY: &str = "overlay-agents";
 /// The setup guide is open: voice events go to it (for the "try it" test) instead of the agent.
 static ONBOARDING: AtomicBool = AtomicBool::new(false);
 const ONBOARDING_LABEL: &str = "onboarding";
@@ -89,6 +90,14 @@ fn is_overlay(label: &str) -> bool {
     label.starts_with("overlay-")
 }
 
+fn is_agent_home(label: &str) -> bool {
+    cfg!(windows) && label == AGENT_HOME_OVERLAY
+}
+
+fn is_roamie_overlay(label: &str) -> bool {
+    is_overlay(label) && !is_agent_home(label)
+}
+
 fn to_sidecar(app: &AppHandle, msg: &Value) {
     if let Some(stdin) = app.state::<Sidecar>().0.lock().unwrap().as_mut() {
         let _ = writeln!(stdin, "{msg}");
@@ -107,7 +116,12 @@ fn to_overlays(app: &AppHandle, msg: &Value) {
     }
     let js = format!("window.__roamieHost&&__roamieHost({msg})");
     for (label, w) in app.webview_windows() {
-        if is_overlay(&label) {
+        if is_agent_home(&label) {
+            // A regular overlay can ask the sidecar to sync before this webview has loaded its host bridge.
+            if matches!(msg.get("kind").and_then(Value::as_str), Some("agents" | "hands" | "sound" | "volume")) {
+                let _ = w.eval(format!("window.__roamieHost?__roamieHost({msg}):(window.__roamieCornerInbox??=[]).push({msg})"));
+            }
+        } else if is_overlay(&label) {
             let _ = w.eval(&js);
         }
     }
@@ -249,6 +263,18 @@ fn exclude_from_capture(w: &WebviewWindow) {
     }
 }
 
+#[cfg(windows)]
+fn raise_agent_home(w: &WebviewWindow) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
+    }
+    if let Ok(h) = w.hwnd() {
+        // HWND_TOPMOST, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE.
+        unsafe { SetWindowPos(h.0 as isize, -1, 0, 0, 0, 0, 0x13) };
+    }
+}
+
 /// Cursor entered or left something clickable: flip click-through.
 #[tauri::command]
 fn set_hot(window: WebviewWindow, hot: bool) {
@@ -259,6 +285,10 @@ fn set_hot(window: WebviewWindow, hot: bool) {
     // A fullscreen game in front gets every click (fullscreen.rs).
     #[cfg(target_os = "macos")]
     let hot = hot && !fullscreen::GAME.load(Ordering::Relaxed);
+    #[cfg(windows)]
+    if hot && is_agent_home(window.label()) {
+        raise_agent_home(&window);
+    }
     OVERLAY_HOT.store(hot, Ordering::Relaxed);
     let _ = window.set_ignore_cursor_events(!hot);
 }
@@ -315,7 +345,7 @@ fn to_sidekick_buddy(app: &AppHandle, msg: &Value) {
     }
     let js = format!("window.__roamieBuddy&&__roamieBuddy({msg})");
     for (label, w) in app.webview_windows() {
-        if is_overlay(&label) {
+        if is_roamie_overlay(&label) {
             let _ = w.eval(&js);
         }
     }
@@ -674,7 +704,7 @@ fn onboarding_finish(app: AppHandle, text: String) {
 }
 
 fn intro_at_tray(app: &AppHandle, tray: Option<tauri::Rect>, text: &str) {
-    let overlays: Vec<WebviewWindow> = app.webview_windows().into_iter().filter(|(l, _)| is_overlay(l)).map(|(_, w)| w).collect();
+    let overlays: Vec<WebviewWindow> = app.webview_windows().into_iter().filter(|(l, _)| is_roamie_overlay(l)).map(|(_, w)| w).collect();
     // Tray icon centre in physical px; without it, aim for the right end of the main screen's menu bar.
     let point = tray.map(|r| {
         let s = 1.0;
@@ -1124,13 +1154,15 @@ fn fix_overlay_size(w: &WebviewWindow, size: tauri::PhysicalSize<u32>) {
 
 fn build_overlays(app: &AppHandle) -> tauri::Result<()> {
     for (label, w) in app.webview_windows() {
-        if is_overlay(&label) {
+        if is_roamie_overlay(&label) {
             w.destroy()?;
         }
     }
     let gen = GENERATION.fetch_add(1, Ordering::Relaxed);
     let monitors = app.available_monitors()?;
     *BUILT_FOR.lock().unwrap() = screens(&monitors);
+    #[cfg(windows)]
+    place_agent_home(app)?;
     let ids = app.state::<Roster>().0.lock().unwrap().clone();
     let n = monitors.len().max(1);
     for (i, mon) in monitors.iter().enumerate() {
@@ -1142,6 +1174,8 @@ fn build_overlays(app: &AppHandle) -> tauri::Result<()> {
         let pos = mon.position().to_logical::<f64>(scale);
         let size = mon.size().to_logical::<f64>(scale);
         let init = format!("window.ROAMIE_ONLY=[{}];window.ROAMIE_AUTOSOUND=true;window.ROAMIE_UNIT=400;", mine.join(","));
+        #[cfg(windows)]
+        let init = format!("{init}window.ROAMIE_AGENT_HOME='separate';");
         // Linux: the page reports its click areas (host.js). Linux and Windows: the window stops a pixel short of the
         // screen, as one of exactly its size is taken for a fullscreen app (GNOME then hides its top bar; Windows
         // draws a strip by an auto-hidden taskbar, #58).
@@ -1195,6 +1229,47 @@ fn build_overlays(app: &AppHandle) -> tauri::Result<()> {
         #[cfg(target_os = "windows")]
         exclude_from_capture(&w);
     }
+    #[cfg(windows)]
+    if let Some(w) = app.get_webview_window(AGENT_HOME_OVERLAY) {
+        raise_agent_home(&w);
+    }
+    Ok(())
+}
+
+/// Keep the same webview when displays or the roster change. Finished shelves only live in this page.
+#[cfg(windows)]
+fn place_agent_home(app: &AppHandle) -> tauri::Result<()> {
+    let Some(mon) = app.primary_monitor()? else { return Ok(()) };
+    let pos = *mon.position();
+    let size = tauri::PhysicalSize::new(mon.size().width, mon.size().height.saturating_sub(1));
+    if let Some(w) = app.get_webview_window(AGENT_HOME_OVERLAY) {
+        if w.inner_position()? != pos {
+            w.set_position(pos)?;
+        }
+        if w.inner_size()? != size {
+            w.set_size(size)?;
+        }
+        return Ok(());
+    }
+    let w = WebviewWindowBuilder::new(app, AGENT_HOME_OVERLAY, WebviewUrl::App("desktop.html".into()))
+        .title("Jarvis")
+        .visible(false)
+        .transparent(true)
+        .decorations(false)
+        .shadow(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focused(false)
+        .focusable(false)
+        .initialization_script("window.ROAMIE_ONLY=[];window.ROAMIE_AGENT_HOME='corner';window.ROAMIE_AUTOSOUND=true;")
+        .build()?;
+    // Position and size in physical pixels after creation, so a secondary monitor's DPI can't offset the corner.
+    w.set_position(pos)?;
+    w.set_size(size)?;
+    w.set_ignore_cursor_events(true)?;
+    exclude_from_capture(&w);
+    w.show()?;
     Ok(())
 }
 
@@ -1466,13 +1541,18 @@ fn watch_screens(app: AppHandle) {
             }
             let Ok(monitors) = app2.available_monitors() else { return };
             let now = screens(&monitors);
-            let have = app2.webview_windows().keys().filter(|l| is_overlay(l)).count();
+            let have = app2.webview_windows().keys().filter(|l| is_roamie_overlay(l)).count();
             let roster = app2.state::<Roster>().0.lock().unwrap().len();
             let built = BUILT_FOR.lock().unwrap().clone();
             if let Some(why) = overlays_stale(&built, &now, have, roster) {
                 eprintln!("[overlays] building them again: {why} ({} screens, {have} overlays)", now.len());
                 if let Err(e) = build_overlays(&app2) {
                     eprintln!("[overlays] couldn't build them: {e}");
+                }
+            } else {
+                #[cfg(windows)]
+                if let Err(e) = place_agent_home(&app2) {
+                    eprintln!("[overlays] couldn't place the agents' corner: {e}");
                 }
             }
         });
@@ -1516,7 +1596,7 @@ fn pump_cursor(app: AppHandle) {
                     let cur = cursor_from_raw(raw.x, raw.y, primary_scale);
                     let t = start.elapsed().as_secs_f64() * 1000.0;
                     for (label, w) in app.webview_windows() {
-                        if !is_overlay(&label) {
+                        if !is_roamie_overlay(&label) {
                             continue;
                         }
                         let (Ok(pos), Ok(scale)) = (w.inner_position(), w.scale_factor()) else { continue };
@@ -1570,7 +1650,8 @@ fn pump_cursor(app: AppHandle) {
             };
             #[cfg(not(target_os = "macos"))]
             let (x, y) = ((cur.0 - pos.x as f64) / scale, (cur.1 - pos.y as f64) / scale);
-            if sent.get(&label) == Some(&(x, y)) {
+            // Retry the corner's initial sample on the refresh beat if its page was still loading.
+            if sent.get(&label) == Some(&(x, y)) && !(is_agent_home(&label) && n % 240 == 1) {
                 continue;
             }
             sent.insert(label.clone(), (x, y));
@@ -1778,6 +1859,201 @@ async fn tokio_sleep(d: Duration) {
     let _ = tauri::async_runtime::spawn_blocking(move || thread::sleep(d)).await;
 }
 
+// ---------- generated widget windows ----------
+
+const WIDGET_PAGE: &str = "widget/index.html";
+const WIDGET_PREFIX: &str = "widget-";
+const WIDGET_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+// WebView2 injects even Tauri's main-frame scripts into child frames. Disable invoke before
+// Tauri's core script publishes it in an opaque, sandboxed document.
+const SANDBOX_IPC_GUARD: &str = r#"
+    if (window.top !== window && window.origin === 'null') {
+        // Every way in: invoke, the raw postMessage it is built on, and WebView2's window.ipc.
+        for (const k of ['invoke', 'postMessage']) try { Object.defineProperty(window.__TAURI_INTERNALS__, k, { value: undefined }); } catch {}
+        for (const k of ['__TAURI__', 'ipc']) try { Object.defineProperty(window, k, { value: undefined }); } catch {}
+    }
+"#;
+
+#[derive(Default)]
+struct Widgets(Mutex<std::collections::HashMap<String, Value>>);
+
+fn read_widget(home: &std::path::Path, folder: &str) -> std::io::Result<String> {
+    use std::io::{Error, ErrorKind, Read};
+    use std::path::Component;
+
+    let denied = || Error::new(ErrorKind::PermissionDenied, "Widget path is outside its agent folder");
+    let mut parts = std::path::Path::new(folder).components();
+    if !matches!(parts.next(), Some(Component::Normal(name)) if name == folder)
+        || parts.next().is_some()
+        || folder.contains(['/', '\\', ':'])
+    {
+        return Err(denied());
+    }
+    let target = home.canonicalize()?.join("Roamies").join("Agents").join(folder).join("files").join("widget.html");
+    let resolved = target.canonicalize()?;
+    // Require the exact file. This rejects escapes through the Agents root, agent, files, or HTML itself.
+    if resolved != target || !resolved.metadata()?.is_file() {
+        return Err(denied());
+    }
+    let mut html = String::new();
+    std::fs::File::open(resolved)?.take(WIDGET_MAX_BYTES + 1).read_to_string(&mut html)?;
+    if html.is_empty() || html.len() as u64 > WIDGET_MAX_BYTES {
+        return Err(Error::new(ErrorKind::InvalidData, "Widget HTML must be between 1 byte and 2 MB"));
+    }
+    Ok(html)
+}
+
+#[tauri::command]
+fn widget_html(window: WebviewWindow, widgets: tauri::State<'_, Widgets>) -> Result<Value, &'static str> {
+    // The IPC caller supplies no path or label. Its window only sees its own validated snapshot.
+    widgets.0.lock().unwrap().get(window.label()).cloned().ok_or("Widget is unavailable")
+}
+
+#[tauri::command]
+fn widget_control(window: WebviewWindow, action: &str) -> Result<(), String> {
+    if !window.label().starts_with(WIDGET_PREFIX) {
+        return Err("Widget controls require a widget window".into());
+    }
+    match action {
+        "close" => window.close(),
+        "drag" => window.start_dragging(),
+        _ => return Err("Unknown widget control".into()),
+    }
+    .map_err(|e| e.to_string())
+}
+
+fn open_widget(app: &AppHandle, args: &Value) {
+    let (Some(id), Some(folder), Some(title)) = (args["id"].as_str(), args["folder"].as_str(), args["title"].as_str()) else { return };
+    if id.len() != 4 || !id.starts_with('a') || !id.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+        return;
+    }
+    let home = std::env::var_os("ROAMIES_DATA_DIR").filter(|p| !p.is_empty()).map(PathBuf::from).or_else(|| app.path().home_dir().ok());
+    let Some(home) = home else { return };
+    let html = match read_widget(&home, folder) {
+        Ok(html) => html,
+        Err(e) => { eprintln!("widget {id}: {e}"); return; }
+    };
+    let label = format!("{WIDGET_PREFIX}{id}");
+    let data = json!({ "html": html, "title": title });
+    let app = app.clone();
+    let ui_app = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Err(e) = show_widget(&ui_app, &label, data) {
+            ui_app.state::<Widgets>().0.lock().unwrap().remove(&label);
+            eprintln!("{label}: {e}");
+        }
+    });
+}
+
+fn show_widget(app: &AppHandle, label: &str, data: Value) -> tauri::Result<()> {
+    let widgets = app.state::<Widgets>();
+    let changed = widgets.0.lock().unwrap().insert(label.into(), data.clone()).as_ref() != Some(&data);
+    if let Some(w) = app.get_webview_window(label) {
+        if changed { let _ = w.reload(); }
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+
+    let (width, height) = (360.0_f64, 480.0_f64);
+    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App(WIDGET_PAGE.into()))
+        .title(data["title"].as_str().unwrap_or("Widget"))
+        .inner_size(width, height)
+        .min_inner_size(240.0, 200.0)
+        .decorations(false)
+        .resizable(true)
+        .skip_taskbar(false)
+        .accept_first_mouse(true)
+        .on_web_resource_request(|request, response| {
+            if request.uri().path() == "/widget/index.html" {
+                use tauri::http::HeaderValue;
+                let headers = response.headers_mut();
+                // Chromium's connection allowlist also covers WebRTC, which CSP fetch rules don't cover.
+                headers.insert("connection-allowlist", HeaderValue::from_static(
+                    r#"(response-origin "http://ipc.localhost/*" "https://ipc.localhost/*");webrtc=block"#,
+                ));
+                headers.insert("x-dns-prefetch-control", HeaderValue::from_static("off"));
+                headers.insert("permissions-policy", HeaderValue::from_static("camera=(), microphone=(), geolocation=(), display-capture=()"));
+            }
+        })
+        // Older webviews may ignore the connection allowlist. These APIs bypass ordinary CSP fetch rules.
+        .initialization_script_for_all_frames(r#"
+            if (window.top !== window) {
+                for (const api of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'SpeechRecognition', 'webkitSpeechRecognition']) {
+                    Object.defineProperty(window, api, { value: undefined, configurable: false, writable: false });
+                }
+            }
+        "#)
+        .on_navigation(|url| {
+            // WebKit also reports navigation of the sandboxed child; WebView2's event is top-level only.
+            #[cfg(not(windows))]
+            if matches!(url.as_str(), "about:blank" | "about:srcdoc") {
+                return true;
+            }
+            matches!((url.scheme(), url.host_str()), ("tauri", Some("localhost")) | ("http" | "https", Some("tauri.localhost")))
+                && url.path() == "/widget/index.html"
+                && url.port().is_none()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+        })
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
+    if let Some(monitor) = app.primary_monitor()? {
+        let work = monitor.work_area();
+        let scale = monitor.scale_factor();
+        let work_width = f64::from(work.size.width) / scale;
+        let work_height = f64::from(work.size.height) / scale;
+        let width = width.min(work_width);
+        let height = height.min(work_height);
+        builder = builder.inner_size(width, height).position(
+            f64::from(work.position.x) / scale + (work_width - width) / 2.0,
+            f64::from(work.position.y) / scale + (work_height - height) / 2.0,
+        );
+    }
+    let w = builder.build()?;
+    let app = app.clone();
+    let label = label.to_owned();
+    w.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            app.state::<Widgets>().0.lock().unwrap().remove(&label);
+        }
+    });
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn widget_reads_only_the_agent_html() {
+    use std::fs;
+    let dir = std::env::temp_dir().join(format!("roamies-widget-{}", std::process::id()));
+    let agents = dir.join("Roamies").join("Agents");
+    let files = agents.join("Example widget").join("files");
+    fs::create_dir_all(&files).unwrap();
+    fs::write(files.join("widget.html"), "<p>Widget</p>").unwrap();
+    let result = read_widget(&dir, "Example widget");
+    let traversal = read_widget(&dir, "../Agents/Example widget");
+    let absolute = read_widget(&dir, files.to_str().unwrap());
+    let outside = dir.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("widget.html"), "<p>Outside</p>").unwrap();
+    let linked = agents.join("Linked").join("files");
+    fs::create_dir_all(linked.parent().unwrap()).unwrap();
+    #[cfg(windows)]
+    let linked_created = std::os::windows::fs::symlink_dir(&outside, &linked).is_ok();
+    #[cfg(unix)]
+    let linked_created = std::os::unix::fs::symlink(&outside, &linked).is_ok();
+    let link = linked_created.then(|| read_widget(&dir, "Linked"));
+    fs::remove_dir_all(dir).unwrap();
+    assert_eq!(result.unwrap(), "<p>Widget</p>");
+    assert_eq!(traversal.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(absolute.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+    if let Some(link) = link {
+        assert_eq!(link.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+    }
+}
+
 fn handle_sidecar(app: &AppHandle, msg: Value) {
     match msg.get("type").and_then(Value::as_str) {
         Some("update") => update(app, msg.get("install").and_then(Value::as_bool) == Some(true)),
@@ -1798,6 +2074,7 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
             }
         }
         Some("panel_show") => show_panel(app, None, false),
+        Some("open_widget") => open_widget(app, &msg["widget"]),
         Some("diagnostics") => {
             let app = app.clone();
             thread::spawn(move || to_sidecar(&app, &diagnostics(&app)));
@@ -1948,7 +2225,9 @@ fn second_launch(app: &AppHandle, args: &[String]) {
 fn main() {
     #[cfg(target_os = "linux")]
     linux::init();
+    let invoke: fn(tauri::ipc::Invoke<Wry>) -> bool = tauri::generate_handler![buddy, ink_wait, set_hot, set_hit_rects, sidecar_send, set_typing, perm_status, perm_request, perm_guide, screen_check, open_settings, onboarding_finish, guide_close, panel_hide, esc_watch, relaunch, focus_guide, guide_aside, drag_window, widget_html, widget_control];
     tauri::Builder::default()
+        .append_invoke_initialization_script(SANDBOX_IPC_GUARD)
         // Must be the first plugin. A second launch (say, straight from the DMG) quits and tells this one what it wanted.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             let app2 = app.clone();
@@ -1961,7 +2240,16 @@ fn main() {
         .manage(TalkChord(Mutex::new(vec!["control".into(), "option".into()])))
         .manage(VoiceModel(Mutex::new(None)))
         .manage(PermGuide(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![buddy, ink_wait, set_hot, set_hit_rects, sidecar_send, set_typing, perm_status, perm_request, perm_guide, screen_check, open_settings, onboarding_finish, guide_close, panel_hide, esc_watch, relaunch, focus_guide, guide_aside, drag_window])
+        .manage(Widgets::default())
+        .invoke_handler(move |request| {
+            let from_widget = request.message.webview_ref().label().starts_with(WIDGET_PREFIX);
+            let widget_command = matches!(request.message.command(), "widget_html" | "widget_control");
+            if from_widget != widget_command {
+                request.resolver.reject("Command is unavailable in this window");
+                return true;
+            }
+            invoke(request)
+        })
         .on_menu_event(|app, e| match e.id.as_ref() {
             "quit" => app.exit(0),
             "restart" => spawn_sidecar(app),

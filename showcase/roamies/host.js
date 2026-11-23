@@ -6,11 +6,36 @@
   const invoke = window.__TAURI__?.core?.invoke;
   if (!invoke) return;
   const send = (msg) => invoke('sidecar_send', { msg }).catch(() => {});
+  if (Roamie.agentHome) Roamie.agentHome.send = send;
+
+  // Windows' primary-screen webview has the corner and no sidekick.
+  if (window.ROAMIE_AGENT_HOME === 'corner') {
+    let cursor = null, hot = null, handsBusy = false;
+    const updateHot = () => {
+      const next = !!cursor && !handsBusy && Roamie.agentHome.hit(...cursor);
+      if (next === hot) return;
+      hot = next;
+      invoke('set_hot', { hot: next }).catch(() => { hot = null; });
+    };
+    window.__roamiePtr = (x, y) => { cursor = [x, y]; updateHot(); };
+    window.__roamieSafe = (s) => { Roamie.setSafe(s); Roamie.agentHome.place(); updateHot(); };
+    window.__roamieHost = (m) => {
+      if (m.kind === 'agents') Roamie.agentHome.event(m.e);
+      if (m.kind === 'sound' && Roamie.sfx) Roamie.sfx.enabled = m.on;
+      if (m.kind === 'volume' && Roamie.sfx) Roamie.sfx.volume = m.v;
+      if (m.kind === 'hands' && typeof m.on === 'boolean') handsBusy = m.on;
+      updateHot();
+    };
+    for (const m of window.__roamieCornerInbox ?? []) window.__roamieHost(m);
+    delete window.__roamieCornerInbox;
+    // Shelves and rows can move under a stationary cursor.
+    setInterval(updateHot, 32);
+    return;
+  }
+
   const typing = (on) => invoke('set_typing', { on }).catch(() => {});
   // Drawings (ink.js) talk to the sidecar (started, waits done, buttons, closed cards) and arm the shell's click watch.
   if (Roamie.ink) { Roamie.ink.send = send; Roamie.ink.invoke = (cmd, args) => invoke(cmd, args).catch(() => {}); }
-  // The agents' corner (agent-home.js): Stop, Allow, file tiles and Open folder go to the sidecar.
-  if (Roamie.agentHome) Roamie.agentHome.send = send;
   window.__roamieClick = (x, y) => Roamie.ink?.click(x, y);
 
   window.__roamieSafe = (s) => Roamie.setSafe?.(s);

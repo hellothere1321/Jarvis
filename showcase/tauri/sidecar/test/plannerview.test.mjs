@@ -51,6 +51,18 @@ assert.deepEqual(ids(view.today.events), ['Holiday', 'Morning', 'Afternoon']);
 assert.deepEqual(view.today.reminders.map((r) => [r.id, r.overdue]), [['r2', true], ['r1', false]]);
 assert.deepEqual(Object.keys(view.today.reminders[0]).sort(), ['due', 'id', 'overdue', 'text']);
 
+// Timers show as timers (the page adds "ends" to their time), never as overdue reminders; fired ones are gone.
+const timerView = V.plannerView(now, { reminders: [
+  { id: 't1', kind: 'timer', text: '10 minute timer', due: at(11, 4, 12, 58) },
+  { id: 't2', kind: 'timer', text: 'Fired timer', due: at(11, 4, 13, 30), status: 'done' },
+  { id: 't3', kind: 'timer', text: 'Done timer', due: at(11, 4, 13, 45), done: true },
+  { id: 't4', kind: 'timer', text: 'Old timer', due: at(11, 3, 9) },
+  { id: 'r5', text: 'Call back', due: at(11, 4, 14) },
+] });
+assert.deepEqual(timerView.today.reminders.map((r) => [r.id, r.timer ?? false, r.overdue]), [['t4', true, false], ['t1', true, false], ['r5', false, false]]);
+assert.equal(timerView.today.reminders[1].text, '10 minute timer');
+assert.equal(timerView.today.reminders[1].due, at(11, 4, 12, 58));
+
 // The same item as the page draws it, with the form's fields as the form shows them.
 const afternoon = view.today.events.find((r) => r.title === 'Afternoon');
 assert.equal(afternoon.form.date, '2026-11-04');

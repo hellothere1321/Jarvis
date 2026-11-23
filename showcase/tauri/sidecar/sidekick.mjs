@@ -8,7 +8,7 @@ import { CONFIG_PATH, DATA_DIR, ROAMIES_DIR } from './datadir.mjs';
 import { Agent } from '@kenkaiiii/gg-agent';
 import { ClaudeCodeAgent, claudeCodeInstaller, closeSpare } from './claudecode.mjs';
 import { SAFE, checkDrawAction, checkLink, checkMcpCall, checkOpen, checkRead, checkWrite, isYes, redactArgs } from './safety.mjs';
-import { agentsRoot, createAgents, holdAfterLaunch, newsDesk, wantsAgent } from './agents.mjs';
+import { agentsRoot, createAgents, holdAfterLaunch, newsDesk, wantsAgent, wantsWidgetBuild } from './agents.mjs';
 import { agentEvents, stallWatch } from './agentstream.mjs';
 import { CATALOG_PROVIDERS, createCatalogs } from './catalogs.mjs';
 import {
@@ -743,6 +743,7 @@ const agents = createAgents({
   config: {
     model: agentModel, subagent: (name) => { const s = config.subagents ? findSubagent(name, crewNow()) : null; return s ? { id: s.id, label: s.label, type: s.type, role: s.role, spec: s.spec.spec, slot: s.slot } : null; }, userWords: () => turnWords, openUrl: (u) => openUrl(u), creds: (m) => credsFor(m.provider, m.model), allowActions: () => !!config.allowActions, skipAllow: () => !!config.allowActions && !!config.skipAllow, image: () => turnImage,
     open: (p) => (process.platform === 'win32' ? winOpen(p) : new Promise((r) => execFile(MAC ? 'open' : 'xdg-open', [p], () => r()))),
+    openWidget: (widget) => send({ type: 'open_widget', widget }),
     reveal: async (p) => reveal(p),
   },
 });
@@ -1522,7 +1523,8 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
   controller = new AbortController();
   agent.setSignal(controller.signal);
   // "Send an agent to…": the agents' corner hatches one instead of the thought cloud while the brief is written.
-  const agentish = !intro && !news && wantsAgent(text);
+  const widgetBuild = !intro && !news && wantsWidgetBuild(text);
+  const agentish = widgetBuild || (!intro && !news && wantsAgent(text));
   turnImage = image;
   ui({ kind: 'agent', e: { type: 'start', ...(agentish ? { agentish: true } : {}) } });
   let hatching = agentish;
@@ -1575,7 +1577,8 @@ async function prompt(text, image = null, note = '', byVoice = false, news = nul
     const along = desk.along(text, { intro: !!intro, news: !!news, agentish });
     const stamped = `[${stampNow()}] ${text}${onScreen ? `\n(${onScreen})` : ''}${along}`;
     const nudge = !agentish && !intro && !news && !handoff ? delegateNote(text, crewNow(), config.delegate) : '';
-    const toAgent = agentish ? `${stamped}\n(They asked for an agent: call send_agent.)` : nudge ? `${stamped}\n${nudge}` : stamped;
+    const toAgent = widgetBuild ? `${stamped}\n(They asked for a tool to use: call send_agent with type maker and returns widget.)`
+      : agentish ? `${stamped}\n(They asked for an agent: call send_agent.)` : nudge ? `${stamped}\n${nudge}` : stamped;
     const asked = handoff ? `${toAgent}\n${handoffNote({ userName, assistant: lookName(), reason: handoff.reason, from: handoff.from, kind: handoff.kind, words: turnWords, untilText: handoff.untilText, because: handoff.because, fix: handoff.fix })}` : toAgent;
     const sent = brief ? `${asked}\n(${brief.note})` : asked;
     // An area snap rides along as an image in the same message.
@@ -3233,6 +3236,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'agent_stop') agents.stop(String(m.id));
   else if (m.type === 'agent_answer') agents.answer(String(m.id), m.allow === true);
   else if (m.type === 'agent_open') agents.openFile(String(m.id), String(m.path ?? '')).catch((e) => console.error('agent open', e));
+  else if (m.type === 'agent_widget') agents.openWidget(String(m.id)).catch((e) => console.error('agent widget', e));
   else if (m.type === 'agent_folder') agents.openFolder(String(m.id), { files: m.files === true }).catch((e) => console.error('agent folder', e));
   else if (m.type === 'agent_dismiss') agents.dismiss(String(m.id));
 }).on('close', () => {
