@@ -30,6 +30,7 @@ import {
 } from './store.mjs';
 import * as planner from './planner.mjs';
 import { createGoogleSync } from './googlesync.mjs';
+import { act as plannerAct, clampWeek, plannerStamp, plannerView, preview as plannerPreview } from './plannerview.mjs';
 import { feedbackOf, foldInput, rateTarget, foldPrompt, lessonInput, lessonPrompt, memoryInput, memoryPrompt, oneShot, parseBrain, parseLesson, parseSkill, shouldLearn, skillInput, skillPrompt, soundsWrong, transcript } from './brain.mjs';
 import { briefNote } from './brief.mjs';
 import { CHECK_MS, DEFAULT_DISTRACTIONS, check as focusCheck, parseDistractions, startBlock } from './focus.mjs';
@@ -679,7 +680,7 @@ const { tools, hands, whereNow, frontNow: frontData, frontBounds, ink, nextTurn 
   onHandoff: (task) => { activity.handoff(task); panel(); },
   commitmentsText: () => [commitmentsText(), doneTodayText() && `Done today:\n${doneTodayText()}`].filter(Boolean).join('\n'),
   onCommitments: commitmentsChanged,
-  onPlanner: () => scheduleReminders(),
+  onPlanner: () => { scheduleReminders(); panel(); },
   showList: () => showList({ seconds: 20 }),
   fmtWhen: (ms) => fmtWhen(ms),
   onPlan: (args) => trail.plan(args),
@@ -2417,6 +2418,7 @@ function panelState() {
     connections: mcp.status(),
     skills: listSkills().map((k) => ({ slug: k.slug, name: k.name, description: k.description })), learnSkills: config.learnSkills !== false,
     commitments: openCommitments().map((c) => ({ id: c.id, text: c.text, due: c.due ?? null, when: c.due ? `${fmtWhen(c.due)}${c.repeat ? ` · repeats ${repeatLabel(c.repeat)}` : ''}` : '', overdue: !!(c.due && c.due < Date.now()), repeat: c.repeat ?? null })),
+    planner: plannerPanel(),
     look: config.look ?? 'classic', looks: LOOKS.map(([id, label]) => [id, label]), name: lookName(),
     size: sizeNow(), sizes: SIZES,
     replies: VOICE_ON() ? 'voice' : 'text', tts: tts().id, fishKey: hasVoiceKey('fish'), geminiKey: hasVoiceKey('gemini'),
@@ -2439,6 +2441,24 @@ function panelState() {
   };
 }
 
+
+// The Planner page: the planner's view (plannerview.mjs) rides on the state, the page's buttons come back here, and
+// the page follows the planner file while it's open, so a change from anywhere (a tool, a sync) shows up.
+let plannerWeek = 0, plannerSeen = '';
+function plannerPanel() {
+  plannerSeen = plannerStamp();
+  return plannerView(Date.now(), { week: plannerWeek, reminders: openCommitments() });
+}
+setInterval(() => { if (panelOpen && plannerStamp() !== plannerSeen) panel(); }, 4000).unref();
+async function plannerFromPanel(op, data = {}) {
+  if (op === 'preview') { panelOpen && send({ type: 'panel', msg: { kind: 'planner', what: 'preview', text: String(data.text ?? ''), shown: plannerPreview(data.text, Date.now(), { kind: data.kind }) } }); return; }
+  if (op === 'week') { plannerWeek = data.by ? clampWeek(plannerWeek + (data.by > 0 ? 1 : -1)) : 0; panel(); return; }
+  const r = await plannerAct(op, data, { open: openUrl });
+  if (r.ok) { scheduleReminders(); showList(); }
+  panel();
+  // After the state above (the page redraws from it), so a cleared box or a closed form shows the new list.
+  setImmediate(() => panelOpen && send({ type: 'panel', msg: { kind: 'planner', what: 'done', op, ok: r.ok, note: r.note, text: data.text ?? null, id: data.id ?? null } }));
+}
 
 // The languages talking can be recognised in (macOS). 'auto' follows the Mac's own language list.
 const SPEECH_LANGS = ['auto', 'en-US', 'ar-SA', 'he-IL', 'es-ES', 'fr-FR', 'de-DE', 'it-IT', 'pt-BR', 'ja-JP', 'ko-KR', 'zh-CN', 'hi-IN'];
@@ -2589,6 +2609,8 @@ async function onMenu(id, via) {
     say('Fresh start. What are we doing?', 'happy');
   } else if (id.startsWith('forget:')) { await forgetFact(id.slice(7)); menu(); }
   else if (id === 'panel') send({ type: 'panel_show' });
+  // The Planner page's ticks and deletes (the delete is asked first in the panel).
+  else if (/^planner:(done|undone|remove):[\w-]+$/.test(id)) { const [, op, itemId] = id.split(':'); await plannerFromPanel(op === 'remove' ? 'remove' : 'done', { id: itemId, done: op !== 'undone' }); }
   else if (id === 'quit') send({ type: 'quit' });
   // The panel asks first in its own words, so this one doesn't ask again.
   else if (id === 'forgetall:yes') { const n = await clearFacts(); menu(); panelNote(`Forgot ${n} thing${n === 1 ? '' : 's'}.`); }
@@ -3011,6 +3033,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   let m;
   try { m = JSON.parse(line); } catch { return; }
   if (m.type === 'menu') onMenu(m.id, m.via).catch((e) => console.error('menu', e));
+  else if (m.type === 'planner' && typeof m.op === 'string') plannerFromPanel(m.op, m.data).catch((e) => console.error('planner', e));
   else if (m.type === 'panel_open') { panelOpen = true; panelAt = Date.now(); logLine('panel_open', {}); if (VOICE_OK) send({ type: 'voice_mics' }); if (meetings) meetingsChanged(); Promise.all([refreshAuth(), signedIn.get('local') && syncLocal(), tts().local && speech.checkLocal()]).catch(() => {}).finally(() => { panel(); refreshCatalogs(); }); }
   else if (m.type === 'meeting_panel') meetingPanel(m);
   else if (m.type === 'meeting' && meetings) {

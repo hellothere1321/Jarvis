@@ -227,6 +227,7 @@
     mark('model', s.state === 'off' ? 'not signed in' : null);
     $('nav-meetings').parentElement.hidden = state.os !== 'win';
     mark('meetings', recording ? 'recording' : null);
+    mark('planner', state.planner?.overdue ? `${state.planner.overdue} overdue` : null);
   }
   // One button for updates, updated in place (not rebuilt) so it keeps focus: Check for updates, then Update to x
   // (it downloads, installs and restarts), then Done. "Up to date" shows for a few seconds after a check.
@@ -1150,14 +1151,188 @@
       'Meetings', el('span', { className: 'dot', 'aria-hidden': 'true' }))));
   $('pane-memory').after(el('section', { className: 'pane', id: 'pane-meetings', 'aria-labelledby': 'nav-meetings', hidden: true }));
 
+  // ---------------------------------------------------------------- Planner
+  // Today, Upcoming, Lists and Week, drawn from the sidecar's planner view (plannerview.mjs). The sidecar understands
+  // the quick-add line (the preview under it is its answer) and does every change; the edit form is one block above
+  // the views, filled from a draft kept here so a redraw never loses what was typed.
+  const pl = { view: 'today', text: '', kind: 'auto', shown: null, edit: null, draft: null, series: false, t: 0, sx: null };
+  const PRIORITY = ['', 'low', 'medium', 'high'];
+  const plSend = (op, data = {}) => send({ type: 'planner', op, data });
+  const plDay = (t) => new Date(t).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  const plTime = (t) => new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
+  const plWhen = (r) => (r.allDay ? 'All day' : r.end == null ? plTime(r.start) : `${plTime(r.start)}–${sameDay(r.start, r.end) ? '' : `${plDay(r.end)} `}${plTime(r.end)}`);
+  // Today, Tomorrow, then the weekday and date.
+  function plHeading(day, now) {
+    const n = Math.round((new Date(day).setHours(0, 0, 0, 0) - new Date(now).setHours(0, 0, 0, 0)) / 864e5);
+    return n === 0 ? 'Today' : n === 1 ? 'Tomorrow' : plDay(day);
+  }
+  // The small line under a title: when, list, priority, repeat, estimate. date: say the day too.
+  function plMeta(r, date, inList = false) {
+    const parts = [];
+    if (r.kind === 'event') parts.push(date ? plDay(r.start) : null, plWhen(r));
+    else if (date) parts.push(r.start == null ? 'No date' : plDay(r.start));
+    parts.push(inList ? null : r.cat || null, r.priority ? `${PRIORITY[r.priority]} priority` : null, r.repeat ? `↻ ${r.repeat}` : null, r.est ? `${r.est} min` : null);
+    return parts.filter(Boolean).join(' · ');
+  }
+  const plTick = (r) => el('button', { className: `pl-check${r.done ? ' on' : ''}`, type: 'button', role: 'checkbox', 'aria-checked': String(r.done), 'data-k': `pl:tick:${r.id}`,
+    'aria-label': `${r.title}${r.done ? ', done' : ''}`, on: { click: () => act(`planner:${r.done ? 'undone' : 'done'}:${r.itemId}`) } });
+  function plEdit(r) {
+    pl.edit = r.itemId; pl.draft = { ...r.form }; pl.series = r.series;
+    render('pl-title');
+  }
+  function plRow(r, { date = false, now = 0, inList = false } = {}) {
+    const meta = plMeta(r, date, inList);
+    return el('li', { className: `item pl${pl.edit === r.itemId ? ' open' : ''}${r.done ? ' done' : ''}${r.kind === 'event' && r.end <= now ? ' past' : ''}` },
+      r.kind === 'task' ? plTick(r) : el('span', { className: 'mark', 'aria-hidden': 'true' }),
+      el('span', { className: 'text', dir: 'auto' },
+        el('button', { className: 'pl-title', type: 'button', textContent: r.title, title: r.title, 'data-k': `pl:edit:${r.id}`, 'aria-label': `Edit ${r.title}`, on: { click: () => plEdit(r) } }),
+        meta ? el('small', { className: r.overdue ? 'late' : '', textContent: meta, title: meta }) : null),
+      el('span', { className: 'row-btns icons' },
+        r.series && r.kind === 'event' ? link('Skip', () => plSend('skip', { id: r.itemId, start: r.start, allDay: r.allDay }), { k: `pl:skip:${r.id}`, aria: `Skip ${r.title} on ${plDay(r.start)}` }) : null,
+        r.link ? link('Link', () => plSend('open', { id: r.itemId }), { k: `pl:link:${r.id}`, aria: `Open the link for ${r.title}` }) : null,
+        iconArmed('x', 'Delete', `pl:del:${r.id}`, `planner:remove:${r.itemId}`, `Delete ${r.title}${r.series ? ' and all its repeats' : ''}`)));
+  }
+  const plList = (rows, opts, label) => el('ul', { className: 'list', 'aria-label': label }, rows.map((r) => plRow(r, opts)));
+
+  // ---- quick add: the sidecar says what it understood, Enter saves it
+  const plKind = () => (pl.kind === 'auto' ? null : pl.kind);
+  function plSaid() {
+    const s = pl.shown;
+    if (!pl.text.trim()) return [el('span', { textContent: 'Say when: “friday”, “tomorrow 3pm”, “every week”. #list and ! to !!! set the list and the priority.' })];
+    if (!s) return [el('span', { textContent: 'Reading…' })];
+    if (!s.ok) return [el('span', { className: 'late', textContent: s.error })];
+    const when = s.kind === 'event' ? `${plDay(s.start)}, ${plWhen(s)}` : s.start == null ? 'no date' : `due ${plDay(s.start)}`;
+    const bits = [s.title, when, s.repeat ? `↻ ${s.repeat}` : null, s.cat ? `list ${s.cat}` : null, s.priority ? `${PRIORITY[s.priority]} priority` : null];
+    return [el('b', { textContent: s.kind === 'event' ? 'Event' : 'Task' }), ` · ${bits.filter(Boolean).join(' · ')} · Enter to save`];
+  }
+  const plPaint = () => { $('pl-said')?.replaceChildren(...plSaid()); };
+  function plAsk() {
+    clearTimeout(pl.t);
+    pl.shown = null; plPaint();
+    if (pl.text.trim()) pl.t = setTimeout(() => plSend('preview', { text: pl.text, kind: plKind() }), 150);
+  }
+  const plAdd = () => { if (pl.text.trim()) plSend('add', { text: pl.text, kind: plKind() }); };
+  function plQuick() {
+    const input = el('input', { type: 'text', value: pl.text, placeholder: 'math homework thursday', 'aria-label': 'Add a task or event', 'aria-describedby': 'pl-said', 'data-k': 'pl-quick', autocomplete: 'off', spellcheck: false,
+      on: { input: (e) => { pl.text = e.target.value; plAsk(); }, keydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); plAdd(); } } } });
+    return el('div', { className: 'group' },
+      el('div', { className: 'keyform' }, el('span', { className: 'px field' }, input), btn('Add', plAdd, { k: 'pl-add' })),
+      el('p', { className: 'pl-said', id: 'pl-said', role: 'status', 'aria-live': 'polite' }, ...plSaid()),
+      picks('Add as', [['auto', 'Automatic'], ['task', 'Task'], ['event', 'Event']], pl.kind, (x) => { pl.kind = x; plAsk(); render(`pl-kind:${x}`); }, 'pl-kind'));
+  }
+
+  // ---- the edit form
+  function plForm(names) {
+    const d = pl.draft, ev = d.kind === 'event';
+    const text = (k, label, props = {}, wide = false) => {
+      const input = el('input', { 'data-k': `pl-${k}`, autocomplete: 'off', spellcheck: false, ...props, value: String(d[k] ?? ''), on: { input: (e) => { d[k] = e.target.value; } } });
+      if (k === 'cat') input.setAttribute('list', 'pl-lists');
+      return el('label', { className: `pl-f${wide ? ' wide' : ''}` }, el('span', { textContent: label }), el('span', { className: 'px field' }, input));
+    };
+    const close = () => { pl.edit = null; pl.draft = null; render(); };
+    const save = () => plSend('save', { id: pl.edit, form: d });
+    return el('div', { className: 'group pl-form', 'aria-label': 'Edit', on: { keydown: (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); close(); }
+      else if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); save(); }
+    } } },
+      el('div', { className: 'ghead' }, el('h2', {}, ev ? 'Edit event' : 'Edit task'), pl.series ? el('p', { textContent: 'This changes every repeat. Use Skip on a row to drop just one.' }) : null),
+      el('div', { className: 'pl-grid' },
+        text('title', 'Title', {}, true),
+        el('div', { className: 'pl-f wide' }, picks('Kind', [['task', 'Task'], ['event', 'Event']], d.kind, (x) => { d.kind = x; render(`pl-kind-f:${x}`); }, 'pl-kind-f')),
+        ev ? el('div', { className: 'pl-f wide' }, toggle('All day', null, d.allDay, () => { d.allDay = !d.allDay; render('pl-allday'); }, 'pl-allday')) : null,
+        text('date', ev ? 'Starts' : 'Due', { type: 'date' }),
+        ev && !d.allDay ? text('time', 'Start time', { type: 'time' }) : null,
+        ev ? text('endDate', d.allDay ? 'Last day' : 'Ends', { type: 'date' }) : null,
+        ev && !d.allDay ? text('endTime', 'End time', { type: 'time' }) : null,
+        text('cat', 'List', { placeholder: 'No list' }),
+        text('est', 'Estimate (minutes)', { type: 'number', min: '0', step: '5' }),
+        el('div', { className: 'pl-f wide' }, picks('Priority', [['0', 'None'], ['1', 'Low'], ['2', 'Medium'], ['3', 'High']], String(d.priority ?? 0), (x) => { d.priority = Number(x); render(`pl-prio:${x}`); }, 'pl-prio')),
+        text('repeat', 'Repeats', { placeholder: 'Doesn’t repeat. Try “every week” or “every other Tuesday”' }, true),
+        text('link', 'Link', { type: 'url', placeholder: 'https://…' }, true),
+        el('label', { className: 'pl-f wide' }, el('span', { textContent: 'Notes' }),
+          el('span', { className: 'px field' }, el('textarea', { value: d.notes ?? '', rows: 3, 'data-k': 'pl-notes', on: { input: (e) => { d.notes = e.target.value; } } }))),
+        el('datalist', { id: 'pl-lists' }, names.map((n) => el('option', { value: n })))),
+      el('div', { className: 'links' }, btn('Save', save, { k: 'pl-save' }), link('Cancel', close, { k: 'pl-cancel' }),
+        armed('Delete', 'Confirm', 'pl-form-del', `planner:remove:${pl.edit}`, 'Delete this item')));
+  }
+
+  // ---- the views
+  const plEmpty = (text) => el('p', { className: 'empty', textContent: text });
+  function plToday(p) {
+    const t = p.today, now = p.now;
+    if (![t.overdue, t.tasks, t.events, t.reminders].some((x) => x.length)) return [plEmpty('Nothing planned for today. Add something above.')];
+    return [
+      t.overdue.length ? group('Overdue', null, t.overdue.length, plList(t.overdue, { date: true, now }, 'Overdue')) : null,
+      t.tasks.length ? group('Tasks', null, t.tasks.length, plList(t.tasks, { now }, 'Tasks today')) : null,
+      t.events.length ? group('Events', null, t.events.length, plList(t.events, { now }, 'Events today')) : null,
+      t.reminders.length ? group('Reminders', 'Ask me to change these.', t.reminders.length, el('ul', { className: 'list', 'aria-label': 'Reminders today' }, t.reminders.map((c) => el('li', { className: 'item mem' },
+        el('span', { className: 'text', dir: 'auto', title: c.text }, c.text, el('small', { className: c.overdue ? 'late' : '', textContent: c.overdue ? `Was due ${plDay(c.due)}, ${plTime(c.due)}` : plTime(c.due) })))))) : null,
+    ];
+  }
+  function plUpcoming(p) {
+    if (!p.upcoming.length) return [plEmpty('Nothing in the next 14 days. Add something above.')];
+    return p.upcoming.map((d) => group(plHeading(d.day, p.now), null, d.items.length, plList(d.items, { now: p.now }, plDay(d.day))));
+  }
+  function plLists(p) {
+    if (!p.lists.length) return [plEmpty('No open tasks. Add one above, and #name puts it in a list.')];
+    return p.lists.map((l) => group(l.name || 'No list', [l.overdue ? `${l.overdue} overdue` : null, l.done ? `${l.done} done` : null].filter(Boolean).join(' · ') || null, l.open, plList(l.items, { date: true, now: p.now, inList: true }, l.name || 'No list')));
+  }
+  // The week is wider than the window: it scrolls sideways, keeps its place when the page redraws, and first opens at today.
+  function plScroll(grid) {
+    const box = el('div', { className: 'pl-scroll', on: { scroll: () => { pl.sx = box.scrollLeft; } } }, grid);
+    requestAnimationFrame(() => {
+      const col = box.querySelector('.pl-col.today');
+      box.scrollLeft = pl.sx ?? (col ? col.getBoundingClientRect().left - box.getBoundingClientRect().left : 0);
+    });
+    return box;
+  }
+  function plWeek(p) {
+    const w = p.week, last = w.days[6].day, shortDay = (t) => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return [
+      el('div', { className: 'pl-weekhead' },
+        btn('‹', () => { pl.sx = null; plSend('week', { by: -1 }); }, { kind: 'ghost mini', k: 'pl-prev', aria: 'Previous week' }),
+        el('span', { className: 'pl-range', textContent: `${shortDay(w.days[0].day)} – ${shortDay(last)}`, 'aria-live': 'polite' }),
+        btn('›', () => { pl.sx = null; plSend('week', { by: 1 }); }, { kind: 'ghost mini', k: 'pl-next', aria: 'Next week' }),
+        w.offset ? link('This week', () => { pl.sx = null; plSend('week'); }, { k: 'pl-thisweek' }) : null),
+      plScroll(el('div', { className: 'pl-week', role: 'group', 'aria-label': 'Week' }, w.days.map((d) => el('section', { className: `pl-col${d.today ? ' today' : ''}`, 'aria-label': plDay(d.day) },
+        el('h3', {}, new Date(d.day).toLocaleDateString(undefined, { weekday: 'short' }), el('span', { textContent: String(new Date(d.day).getDate()) })),
+        el('ul', { className: 'list' }, d.items.map((r) => el('li', { className: `pl-chip ${r.kind}${r.done ? ' done' : ''}${r.kind === 'event' && r.end <= p.now ? ' past' : ''}` },
+          r.kind === 'task' ? plTick(r) : null,
+          el('button', { className: 'pl-title', type: 'button', title: `${r.title}${plMeta(r, false) ? ` · ${plMeta(r, false)}` : ''}`, 'data-k': `pl:edit:${r.id}`, 'aria-label': `Edit ${r.title}`, on: { click: () => plEdit(r) } },
+            r.kind === 'event' && !r.allDay ? el('small', { textContent: plTime(r.start) }) : null, r.title)))))))),
+    ];
+  }
+  const PL_VIEWS = [['today', 'Today'], ['upcoming', 'Upcoming'], ['lists', 'Lists'], ['week', 'Week']];
+  function plannerPage() {
+    const p = state.planner;
+    if (!p || p.error) return [group('Planner', p?.error ? `I couldn’t read the planner: ${p.error}` : 'The planner isn’t ready yet.', null)];
+    const body = { today: plToday, upcoming: plUpcoming, lists: plLists, week: plWeek }[pl.view](p);
+    return [
+      plQuick(),
+      pl.draft ? plForm(p.names) : null,
+      el('div', { className: 'mhead' }, tabRow('Planner views', 'pl-panel', PL_VIEWS, pl.view, (id) => { pl.view = id; pl.sx = null; })),
+      tabPanel('pl-panel', pl.view, ...body),
+    ];
+  }
+  // What the sidecar says back: what it understood of the line being typed, and how a change went.
+  function plannerMsg(m) {
+    if (m.what === 'preview') { if (m.text === pl.text) { pl.shown = m.shown; plPaint(); } return; }
+    if (m.what !== 'done') return;
+    note(m.note, !m.ok);
+    if (!m.ok) return;
+    if (m.op === 'add' && m.text === pl.text) { pl.text = ''; pl.shown = null; render('pl-quick'); }
+    else if (m.op === 'save' || (m.op === 'remove' && m.id === pl.edit)) { pl.edit = null; pl.draft = null; render(); }
+  }
+
   // ---------------------------------------------------------------- render
-  const PANES = { home, memory, meetings: meetingsPage, abilities: abilitiesPage, model: modelPage, appearance: appearancePage, speaking: speakingPage, listening: listeningPage, shortcuts: shortcutsPage, general: generalPage, about: aboutPage, whatsnew: whatsNewPage };
+  const PANES = { home, memory, planner: plannerPage, meetings: meetingsPage, abilities: abilitiesPage, model: modelPage, appearance: appearancePage, speaking: speakingPage, listening: listeningPage, shortcuts: shortcutsPage, general: generalPage, about: aboutPage, whatsnew: whatsNewPage };
   // focusKey: what to focus after (a data-k, or an element id); otherwise whatever had focus keeps it.
   function render(focusKey, animate = false) {
     if (!state) return;
     const active = document.activeElement;
     // Never rebuild under someone typing a key: catch up when they leave the field.
-    if (!focusKey && !animate && active?.tagName === 'INPUT' && active.closest('.pane')) { deferred = true; return; }
+    if (!focusKey && !animate && (active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') && active.closest('.pane')) { deferred = true; return; }
     deferred = false;
     const keep = focusKey ?? active?.dataset?.k ?? (active?.id?.startsWith('key-') ? active.id : null);
     hideTip();
@@ -1184,7 +1359,7 @@
     }
     if (keep) (document.querySelector(`.pane [data-k="${CSS.escape(keep)}"]`) ?? document.getElementById(keep))?.focus();
   }
-  document.addEventListener('focusout', (e) => { if (deferred && e.target.tagName === 'INPUT') setTimeout(() => deferred && render(), 0); });
+  document.addEventListener('focusout', (e) => { if (deferred && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) setTimeout(() => deferred && render(), 0); });
   // The window changes size with the screen it opens on: as many rows as fit there.
   let resizeTimer = 0;
   addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => state && render(), 120); });
@@ -1323,6 +1498,7 @@
       render('meetings-back');
       $('pane-meetings').scrollTop = 0;
     }
+    else if (m.kind === 'planner') plannerMsg(m);
     else if (m.kind === 'note') note(m.text, m.bad, m.copy);
     else if (m.kind === 'copied' && m.which === 'problem') note(m.ok ? 'Copied the error details. Paste them into your report.' : "Couldn't copy the error details. Try Save diagnostics.", !m.ok);
     else if (m.kind === 'copied') {
@@ -1413,6 +1589,28 @@
       update: { available: new URLSearchParams(location.search).has('update') && new URLSearchParams(location.search).get('update') !== 'failed' ? '0.9.1' : null, installing: false, checking: false, result: null },
       intro: false,
     };
+    // The Planner page's sample: what the sidecar's view (plannerview.mjs) sends, for a few items.
+    const D = (n, h = 0, m = 0) => { const d = new Date(); d.setDate(d.getDate() + n); d.setHours(h, m, 0, 0); return +d; };
+    const iso = (t) => new Date(t - new Date(t).getTimezoneOffset() * 6e4).toISOString();
+    const plItem = (o) => {
+      const r = { id: o.title, itemId: o.title, kind: 'task', notes: '', start: null, end: null, allDay: false, done: false, overdue: false, repeat: '', series: false, cat: '', priority: 0, est: 0, spent: 0, link: '', ...o };
+      const ev = r.kind === 'event', timed = ev && !r.allDay;
+      return { ...r, form: { title: r.title, notes: r.notes, kind: r.kind, allDay: r.allDay, date: r.start == null ? '' : iso(r.start).slice(0, 10), time: timed ? iso(r.start).slice(11, 16) : '',
+        endDate: ev ? iso(r.allDay ? r.end - 864e5 : r.end).slice(0, 10) : '', endTime: timed ? iso(r.end).slice(11, 16) : '', cat: r.cat, priority: r.priority, repeat: r.repeat, est: r.est, link: r.link } };
+    };
+    const late = plItem({ title: 'Lab report', start: D(-2), overdue: true, cat: 'School', priority: 3 }), maths = plItem({ title: 'Math homework', start: D(0), cat: 'School', est: 45 });
+    const walk = plItem({ title: 'Walk the dog', start: D(0), repeat: 'Every day', done: true }), gym = plItem({ title: 'Gym', kind: 'event', start: D(0, 7), end: D(0, 8), repeat: 'Every weekday', series: true, id: 'gym@0' });
+    const dentist = plItem({ title: 'Dentist', kind: 'event', start: D(1, 15), end: D(1, 16), repeat: 'Every other week on Tuesday', series: true, id: 'dentist@1' }), trip = plItem({ title: 'Trip', kind: 'event', allDay: true, start: D(2), end: D(5) });
+    const essay = plItem({ title: 'Essay draft', start: D(3), cat: 'School', priority: 2 }), milk = plItem({ title: 'Buy milk', cat: 'Home' });
+    const mon = D(-((new Date().getDay() + 6) % 7));
+    const wk = { 0: [gym, maths, walk], 1: [dentist, trip], 2: [trip], 3: [trip, essay], '-2': [late] };
+    s.planner = {
+      now: at, error: null, overdue: 1, names: ['Home', 'School'],
+      today: { overdue: [late], tasks: [maths, walk], events: [gym], reminders: [{ id: 'r1', text: 'Call back the landlord', due: D(0, 16), overdue: false }] },
+      upcoming: [{ day: D(1), today: false, items: [dentist, trip] }, { day: D(2), today: false, items: [trip] }, { day: D(3), today: false, items: [trip, essay] }],
+      lists: [{ name: 'Home', open: 1, overdue: 0, done: 0, items: [milk] }, { name: 'School', open: 3, overdue: 1, done: 2, items: [late, maths, essay] }],
+      week: { start: mon, offset: 0, days: Array.from({ length: 7 }, (_, i) => { const day = new Date(mon); day.setDate(day.getDate() + i); const k = Math.round((+day - D(0)) / 864e5); return { day: +day, today: k === 0, items: wk[k] ?? [] }; }) },
+    };
     if (q.has('busy')) Object.assign(s, { busy: true, status: { state: 'busy', text: 'Reading notes.md' } });
     if (q.has('empty')) Object.assign(s, { recent: [], facts: [], commitments: [], jobs: [], skills: [], connections: [], usage: null });
     if (q.has('many')) {
@@ -1439,7 +1637,7 @@
     // ?v=0.1.36&from=0.1.35: What's new as it looks just after updating from one version to the other.
     if (q.get('v')) s.version = q.get('v');
     if (q.get('from')) s.whatsNewFrom = q.get('from');
-    if (q.get('tab')) setTimeout(() => { if (q.get('mtab')) ui.mtab = q.get('mtab'); if (q.get('atab')) ui.tabs.abilities = q.get('atab'); show(q.get('tab')); }, 0);
+    if (q.get('tab')) setTimeout(() => { if (q.get('mtab')) ui.mtab = q.get('mtab'); if (q.get('atab')) ui.tabs.abilities = q.get('atab'); if (q.get('plview')) pl.view = q.get('plview'); if (q.has('pledit')) { pl.edit = 'x'; pl.draft = { ...(q.get('pledit') === 'event' ? s.planner.today.events[0] : s.planner.today.overdue[0]).form }; pl.series = q.get('pledit') === 'event'; } show(q.get('tab')); }, 0);
     setTimeout(() => window.__panel({ kind: 'state', state: s }), 0);
     return async (cmd, args) => {
       if (cmd !== 'sidecar_send') return null;

@@ -365,6 +365,61 @@ html, body { height: 100%; background: transparent; }
 .tip.in { animation: dissolve-in 140ms step-end both; }
 @media (prefers-reduced-motion: reduce) { .tip.in { animation: none; } }
 
+/* ---------- Planner: quick add, its rows, the edit form and the week ---------- */
+/* What the quick-add line understood, under it: the kind lit, an error in the danger colour. */
+.pl-said { margin: 0; min-height: 1.4em; font-size: var(--t-small); line-height: 1.4; color: var(--ink-2); overflow-wrap: anywhere; }
+.pl-said b { color: var(--accent); }
+.pl-said .late { color: var(--danger); }
+/* A row: a tick box (a task) or the event's mark, the title (press it to edit) with its small line, then its actions. */
+.item.pl { grid-template-columns: 16px minmax(0, 1fr) auto; }
+.item.pl.open { padding-inline: 8px; background: #0a2a28; }
+.item.pl.past .text { color: var(--ink-3); }
+.item.pl .row-btns .link { margin-inline-end: 8px; font-size: var(--t-small); }
+.pl-title {
+  appearance: none; border: 0; background: none; padding: 0; margin: 0; max-width: 100%; display: block; text-align: start;
+  font: inherit; color: inherit; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pl-title:hover { color: var(--accent-hi); }
+.pl-title:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.item.pl.done .pl-title, .pl-chip.done .pl-title { text-decoration: line-through; color: var(--ink-3); }
+.pl-check { appearance: none; flex: none; width: 14px; height: 14px; padding: 0; justify-self: center; border: 2px solid var(--line-hi); background: transparent; cursor: pointer; }
+.pl-check:hover { border-color: var(--accent); }
+.pl-check.on { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 6px rgba(120, 255, 226, 0.5); }
+.pl-check:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+/* The edit form: two columns of labelled fields, the long ones across both. */
+.pl-form { padding: 10px 12px; border: 1px dashed var(--line-hi); }
+.pl-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }
+.pl-f { display: grid; gap: 4px; min-width: 0; align-content: start; }
+.pl-f.wide { grid-column: 1 / -1; }
+.pl-f > span:first-child { font: 700 var(--t-small)/1.3 var(--mono); font-stretch: 87.5%; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+.pl-form input[type="date"], .pl-form input[type="time"] { color-scheme: dark; }
+.body textarea {
+  min-width: 0; flex: 1; min-height: 3.6em; padding: 8px 10px; border: 0; background: transparent; color: var(--ink); resize: vertical;
+  font: 500 var(--t-small)/1.4 var(--mono); font-stretch: 87.5%; user-select: text;
+}
+.body textarea:focus-visible { outline: none; }
+.body textarea::placeholder { color: var(--ink-3); }
+/* The week: seven columns (it scrolls sideways when the window is narrow), today's outlined in the accent. */
+.pl-weekhead { display: flex; align-items: center; gap: 10px; }
+.pl-range { min-width: 8.5em; text-align: center; font: 700 var(--t-body)/1.25 var(--mono); font-stretch: 87.5%; color: var(--ink); font-variant-numeric: tabular-nums; }
+.pl-scroll { overflow-x: auto; padding-bottom: 6px; }
+.pl-week { display: grid; grid-template-columns: repeat(7, minmax(92px, 1fr)); gap: 6px; align-items: start; }
+.pl-col { min-width: 0; min-height: 96px; display: grid; gap: 4px; align-content: start; padding: 4px; border: 1px dashed var(--line); }
+.pl-col.today { border: 1px solid var(--accent); }
+.pl-col h3 { margin: 0; display: flex; justify-content: space-between; align-items: baseline; font: 700 var(--t-small)/1.3 var(--mono); font-stretch: 87.5%; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+.pl-col h3 span { font-weight: 500; }
+.pl-col.today h3 { color: var(--accent); }
+.pl-col .list { gap: 3px; }
+.pl-chip { display: flex; align-items: flex-start; gap: 4px; min-width: 0; padding: 3px 4px; border-inline-start: 3px solid var(--line-hi); }
+.pl-chip.event { border-inline-start-color: var(--accent); background: #0a2a28; }
+.pl-chip .pl-title {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; white-space: normal; overflow: hidden;
+  font-size: var(--t-small); line-height: 1.3; overflow-wrap: anywhere;
+}
+.pl-chip .pl-title small { display: block; color: var(--ink-3); }
+.pl-chip .pl-check { width: 10px; height: 10px; margin-top: 2px; }
+.pl-chip.past .pl-title { color: var(--ink-3); }
+
 /* ---------- note: what just happened after something you did here ---------- */
 .note {
   margin: 0; padding: 9px var(--gut); border-top: 1px dashed var(--line);
