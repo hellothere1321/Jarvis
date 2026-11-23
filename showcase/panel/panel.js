@@ -976,6 +976,21 @@
   }
   // What I may do, and when I start.
   function generalPage() {
+    const google = state.googleSync;
+    const clientFile = google && !google.connected ? el('input', {
+      type: 'file', accept: '.json,application/json', hidden: true,
+      on: { change: async (event) => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+        const text = file.size <= 32_768 ? await file.text().catch(() => '') : '';
+        event.target.value = '';
+        send({ type: 'panel_google_client', text });
+      } },
+    }) : null;
+    const googleStatus = google && ({
+      load: 'Checking connection…', import: 'Saving OAuth client…', connect: 'Finish signing in in your browser.',
+      disconnect: 'Disconnecting…', sync: 'Syncing…',
+    }[google.busy] ?? (google.connected ? 'Connected' : 'Disconnected'));
     return [
       group('General', 'What I may do, and when I start.', null,
         toggle('Sound effects', null, state.sound, () => act('sound'), 'sound'),
@@ -991,6 +1006,18 @@
           el('span', {}, 'Sync memory', el('small', { title: state.sync.dir, textContent: !state.sync.dir ? 'Share reminders and memory with your other computer' : state.sync.error ? `Not syncing: ${state.sync.error}` : `Via ${state.sync.dir.split(/[\\/]/).filter(Boolean).pop()}${state.sync.at ? ` · ${new Date(state.sync.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : ''}` })),
           state.sync.dir ? [state.sync.paused ? link('Sync anyway', () => act('syncallow'), { k: 'syncallow', danger: true, aria: 'Sync anyway, removing those items on every computer' }) : null,
             link('Stop', () => act('syncstop'), { k: 'syncstop', aria: 'Stop syncing memory' })] : link('Set up', () => act('syncsetup'), { k: 'syncsetup', aria: 'Set up memory sync' })) : null),
+      google ? group('Google Calendar and Tasks',
+        google.hasClient ? 'Sync planner changes with your primary Google Calendar and Google Tasks lists.' : 'In Google Cloud Console, enable the Calendar and Tasks APIs. Configure the OAuth consent screen and add yourself as a test user if required. Create a Desktop app OAuth client, then download and choose its JSON file.',
+        null,
+        el('div', { className: 'setting' },
+          el('span', { 'aria-live': 'polite' }, google.email || googleStatus,
+            google.email && google.busy ? el('small', {}, googleStatus) : null,
+            google.lastSync ? el('small', {}, `Last synced ${new Date(google.lastSync).toLocaleString()}`) : null,
+            google.lastError ? el('small', {}, google.lastError) : null),
+          el('span', { className: 'row-btns' }, clientFile,
+            clientFile ? link(google.hasClient ? 'Change client' : 'Choose JSON file', () => clientFile.click(), { k: 'google-file', disabled: !!google.busy }) : null,
+            google.connected ? link('Disconnect', () => act('google-disconnect'), { k: 'google-disconnect', disabled: !!google.busy })
+              : link('Connect', () => act('google-connect'), { k: 'google-connect', disabled: !!google.busy || !google.hasClient })))) : null,
     ];
   }
   // Who made Roamies: Ken, live (he's drawn like the looks but isn't one), and where to find him.

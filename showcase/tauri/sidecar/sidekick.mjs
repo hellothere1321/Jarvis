@@ -29,6 +29,7 @@ import {
   touchFacts, forDisk, forProvider, loadLatestSession, newSession, openCommitments, pruneSessions, readJson, saveSession, takeDueReminders, updateCommitment, writeJson,
 } from './store.mjs';
 import * as planner from './planner.mjs';
+import { createGoogleSync } from './googlesync.mjs';
 import { feedbackOf, foldInput, rateTarget, foldPrompt, lessonInput, lessonPrompt, memoryInput, memoryPrompt, oneShot, parseBrain, parseLesson, parseSkill, shouldLearn, skillInput, skillPrompt, soundsWrong, transcript } from './brain.mjs';
 import { briefNote } from './brief.mjs';
 import { CHECK_MS, DEFAULT_DISTRACTIONS, check as focusCheck, parseDistractions, startBlock } from './focus.mjs';
@@ -244,6 +245,13 @@ async function voiceKey(id) {
   return shared ? [shared, 'shared'] : [null, false];
 }
 const secrets = createSecrets({ hands: process.env.ROAMIES_HANDS || '', dataDir: DATA_DIR });
+const googleSync = createGoogleSync({
+  dataDir: DATA_DIR, secrets, changed: panel,
+  openUrl: (url) => {
+    if (checkLink(url).level !== SAFE) throw new Error('Google sign-in link blocked.');
+    openUrl(url);
+  },
+});
 let voiceProblemAt = 0;
 // Beats made on this computer (a Gemini voice's, or a Fish voice the app doesn't ship) are kept, so each voice
 // and model's are only made once.
@@ -2356,6 +2364,7 @@ function panelState() {
     usage: usageToday.requests ? { requests: usageToday.requests, tokens: usageToday.tokens } : null,
     facts: listFacts().slice().reverse().map((f) => ({ id: f.id, text: f.text })),
     jobs: listJobs().map(jobRow),
+    googleSync: googleSync.state(),
     connections: mcp.status(),
     skills: listSkills().map((k) => ({ slug: k.slug, name: k.name, description: k.description })), learnSkills: config.learnSkills !== false,
     commitments: openCommitments().map((c) => ({ id: c.id, text: c.text, due: c.due ?? null, when: c.due ? `${fmtWhen(c.due)}${c.repeat ? ` · repeats ${repeatLabel(c.repeat)}` : ''}` : '', overdue: !!(c.due && c.due < Date.now()), repeat: c.repeat ?? null })),
@@ -2663,6 +2672,12 @@ async function onMenu(id, via) {
     config.distractions = list.length ? list : null; saveConfig(); menu();
     say(list.length ? `Got it: ${list.length} thing${list.length === 1 ? '' : 's'} I'll keep you away from.` : 'Back to my usual list.', 'happy');
   }
+  else if (id === 'google-connect') {
+    if (await googleSync.connect()) queueGoogleSync(0);
+  }
+  else if (id === 'google-disconnect') {
+    await googleSync.disconnect();
+  }
   else if (id === 'syncsetup') {
     const hint = suggestFolders()[0] ?? '';
     const typed = await ask({ prompt: `Sync memory with your other computer: the path of a folder both computers sync (iCloud Drive, OneDrive, Dropbox, Google Drive)${hint ? `. Found: ${hint}` : ''}`, placeholder: hint || 'Folder path' });
@@ -2946,6 +2961,9 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'panel_open') { panelOpen = true; panelAt = Date.now(); logLine('panel_open', {}); if (VOICE_OK) send({ type: 'voice_mics' }); Promise.all([refreshAuth(), signedIn.get('local') && syncLocal(), tts().local && speech.checkLocal()]).catch(() => {}).finally(() => { panel(); refreshCatalogs(); }); }
   else if (m.type === 'diagnostics') { shellInfo?.(m); shellInfo = null; }
   else if (m.type === 'panel_closed') { panelOpen = false; logLine('panel_closed', { why: String(m.why ?? ''), ms: Date.now() - panelAt }); }
+  else if (m.type === 'panel_google_client' && typeof m.text === 'string') {
+    void googleSync.importClient(m.text.slice(0, 32_769));
+  }
   else if (m.type === 'panel_key' && typeof m.provider === 'string' && typeof m.key === 'string') {
     const id = typeof m.kind === 'string' ? m.kind : m.provider;
     const label = PROVIDER_LABELS[m.provider] ?? m.provider;
@@ -3082,6 +3100,23 @@ function scheduleReminders() {
   }, wait);
 }
 scheduleReminders();
+
+let googleTimer;
+function queueGoogleSync(delay = 2000) {
+  const { connected, retryAt } = googleSync.state();
+  if (!connected) return;
+  clearTimeout(googleTimer);
+  googleTimer = setTimeout(async () => {
+    if (googleSync.state().busy) return queueGoogleSync();
+    await googleSync.sync();
+    scheduleReminders();
+    if (googleSync.state().retryAt) queueGoogleSync(0);
+  }, Math.max(delay, retryAt - Date.now()));
+  googleTimer.unref();
+}
+planner.onLocalChange(() => queueGoogleSync());
+setInterval(() => queueGoogleSync(0), 300_000).unref();
+void googleSync.init().then(() => queueGoogleSync(0));
 
 // Scheduled jobs (jobs.mjs): at its time each one starts a background agent, with the usual safety checks and Allow
 // prompts; what it finds comes back as agent news (desk.tick). A recurring job carries on in its last run's folder.

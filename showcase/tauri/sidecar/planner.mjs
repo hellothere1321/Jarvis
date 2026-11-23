@@ -29,13 +29,33 @@ function load() {
 
 // Queue the whole read/modify/write so overlapping tools and alert ticks see each other's changes.
 let pending = Promise.resolve();
-function change(fn) {
+const localListeners = new Set();
+export function onLocalChange(listener) {
+  localListeners.add(listener);
+  return () => localListeners.delete(listener);
+}
+
+export const syncItems = load;
+export function applySync(merge) {
+  return change((items) => {
+    const before = JSON.stringify(items);
+    merge(items, (values) => {
+      const item = { ...defaults, skip: [], ...values, id: randomUUID() };
+      items.push(item);
+      return item;
+    });
+    return JSON.stringify(items) === before ? null : true;
+  });
+}
+
+function change(fn, local = false) {
   const next = pending.then(async () => {
     const items = load();
     const result = fn(items);
     if (result == null) return null;
     await writeJson(file, items, { backup: true });
     if (JSON.stringify(readJson(file)) !== JSON.stringify(items)) throw new Error('Could not save the planner.');
+    if (local) for (const listener of localListeners) listener();
     return result;
   });
   pending = next.catch(() => {});
@@ -97,7 +117,7 @@ export function add(values, now = Date.now()) {
     const item = normalize({ ...defaults, skip: [], ...picked([...editable, ...localFields, 'kind'], values), id: randomUUID() }, now, true);
     items.push(touched(item, now));
     return item;
-  });
+  }, true);
 }
 
 export function update(id, values, now = Date.now()) {
@@ -116,7 +136,7 @@ export function update(id, values, now = Date.now()) {
       next.firedFor = null;
     }
     return Object.assign(item, touched(next, now));
-  });
+  }, true);
 }
 
 export function edit(id, values) {
@@ -126,29 +146,32 @@ export function edit(id, values) {
   });
 }
 
+export function advanceCompletedTask(item, now) {
+  const rule = parseRule(item.repeat);
+  if (!rule || item.start == null) return false;
+  // A late completion skips dates that have already passed, including their share of COUNT.
+  const next = nextOccurrence(rule, item.start, Math.max(item.start, midnight(now)));
+  if (next == null) return false;
+  if (rule.count) {
+    const elapsed = [...expand(rule, item.start, item.start, next)].length;
+    item.repeat = formatRule({ ...rule, count: rule.count - elapsed });
+  }
+  item.start = next;
+  item.done = false;
+  item.lastDone = now;
+  touched(item, now);
+  return true;
+}
+
 export function complete(id, now = Date.now(), { done = true } = {}) {
   return change((items) => {
     const item = items.find((candidate) => candidate.id === id && live(candidate) && candidate.kind === 'task');
     if (!item || item.done === done) return item ?? null;
-    const rule = done && parseRule(item.repeat);
-    if (rule && item.start != null) {
-      // A late completion skips dates that have already passed, including their share of COUNT.
-      const after = Math.max(item.start, midnight(now));
-      const next = nextOccurrence(rule, item.start, after);
-      if (next != null) {
-        if (rule.count) {
-          const elapsed = [...expand(rule, item.start, item.start, next)].length;
-          item.repeat = formatRule({ ...rule, count: rule.count - elapsed });
-        }
-        item.start = next;
-        item.lastDone = now;
-        return touched(item, now);
-      }
-    }
+    if (done && advanceCompletedTask(item, now)) return item;
     item.done = done;
     item.lastDone = done ? now : null;
     return touched(item, now);
-  });
+  }, true);
 }
 
 export function remove(id, now = Date.now()) {
@@ -157,7 +180,7 @@ export function remove(id, now = Date.now()) {
     if (!item) return null;
     item.deleted = true;
     return touched(item, now);
-  });
+  }, true);
 }
 
 export const get = (id) => load().find((item) => item.id === id && live(item)) ?? null;
@@ -194,7 +217,7 @@ export function skipOccurrence(id, start, allDay = false, now = Date.now()) {
     item.skip = [...item.skip, event.start];
     touched(item, now);
     return event;
-  });
+  }, true);
 }
 
 // A bounded query expands events. An unbounded query returns the stored event series.
