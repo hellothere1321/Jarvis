@@ -394,14 +394,15 @@ export const startOfDay = (ms) => { const d = new Date(ms); d.setHours(0, 0, 0, 
 
 /** What the on-screen list shows: open items, plus ones finished today (struck through). Today = due today or
  *  overdue, and things finished today; Later = due after today, or no time. Soonest first, undated last. */
-export function listItems(now = Date.now()) {
+export function listItems(now = Date.now(), plannerToday = []) {
   const today = startOfDay(now), tomorrow = startOfDay(today + 36 * 36e5);
   const shown = loadMemory().commitments.filter((c) => c.status === 'open' || (c.status === 'done' && (c.doneAt ?? 0) >= today));
   const item = (c) => ({ id: c.id, text: c.text, due: c.due, done: c.status === 'done', overdue: c.status === 'open' && !!c.due && c.due < now, kind: c.kind ?? 'commitment', repeat: c.repeat ?? null });
   const order = (a, b) => ((a.status === 'done') - (b.status === 'done')) || ((a.due ?? Infinity) - (b.due ?? Infinity)) || a.createdAt - b.createdAt;
   const isToday = (c) => (c.status === 'done' ? (c.due == null || c.due < tomorrow) : c.due != null && c.due < tomorrow);
   return {
-    today: shown.filter(isToday).sort(order).map(item),
+    today: [...shown.filter(isToday).sort(order).map(item), ...plannerToday].sort((a, b) =>
+      Number(a.done) - Number(b.done) || (a.due ?? Infinity) - (b.due ?? Infinity)),
     later: shown.filter((c) => !isToday(c)).sort(order).map(item),
   };
 }

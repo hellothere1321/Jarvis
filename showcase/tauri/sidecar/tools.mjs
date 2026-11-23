@@ -14,6 +14,8 @@ import { CARDS, DrawArgs, drawModelSchema, LIMITS, checkDraw, createLists, creat
 import { plain } from './intro.mjs';
 import { linuxSession, seesPointer } from './platform.mjs';
 import { addCommitment, forgetFact, getCommitment, parseDue, parseRepeat, repeatLabel, updateCommitment } from './store.mjs';
+import * as planner from './planner.mjs';
+import { addDays, midnight, parseWhen } from './when.mjs';
 import { snoozeTarget, snoozeUntil } from './snooze.mjs';
 import { addJob, getJob, jobsText, removeJob, updateJob } from './jobs.mjs';
 import { deleteSkill, fetchSkills, installSkill, listSkills, readSkill, readSkillFile, saveSkill, screenSkill, skillFiles } from './skills.mjs';
@@ -251,7 +253,43 @@ export function oneYesNoAtATime(ask) {
   };
 }
 
-export function createTools({ allowActions, ui, ask, openUrl, onCommitments, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', skipAllow = () => false, jobs = null, skills = null }) {
+const plannerDate = (text, now, options) => {
+  const date = parseWhen(text, now, options);
+  if (!date || date.rest) throw new Error(`Couldn't read "${text}" as a date or time. Try Friday at 3pm or local YYYY-MM-DDTHH:mm.`);
+  return date;
+};
+const plannerTitle = z.string().trim().min(1).max(200);
+const plannerWhen = z.string().max(120);
+const plannerFields = {
+  list: z.string().max(80).optional(),
+  priority: z.number().int().min(0).max(3).optional(),
+  repeat: z.string().max(160).optional(),
+  notes: z.string().max(2000).optional(),
+};
+const plannerAlert = z.number().int().min(0).optional();
+
+function plannerValues({ list, repeat, ...values }) {
+  if (list !== undefined) values.cat = list;
+  if (repeat !== undefined) values.repeat = repeat === 'none' ? null : repeat;
+  return values;
+}
+
+function eventTimes(when, end, now, previousStart) {
+  const time = when === undefined ? null : plannerDate(when, now);
+  const result = time ? { start: time.start, allDay: time.allDay } : {};
+  if (end !== undefined) result.end = plannerDate(end, now, { timeAfter: time?.start ?? previousStart ?? now }).start;
+  else if (time?.end != null) result.end = time.end;
+  return result;
+}
+
+function plannerFound(item, id) {
+  if (!item) throw new Error(`No matching planner item with id ${id}. Use list_planner to find it.`);
+  return item;
+}
+
+export const PLANNER_TOOLS = new Set(['add_task', 'add_event', 'update_planner_item', 'complete_task', 'delete_planner_item', 'list_planner']);
+
+export function createTools({ allowActions, ui, ask, openUrl, onCommitments, onPlanner = () => {}, focus = null, firedReminders = () => [], showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {}, askShell = async () => ({ ok: false, error: 'Roamies isn\'t running.' }), workdir = HOME, own = null, sideSearch = async () => null, pointScale = () => 'pixels', skipAllow = () => false, jobs = null, skills = null }) {
   // Relative paths (and run_command) start in workdir: ~/Roamies for the chat, its own folder for an agent.
   const at = (p) => { const s = String(p ?? ''); return /^~(?=$|\/|\\)/.test(s) || path.isAbsolute(s) || /^[a-z]:[\\/]/i.test(s) ? s : path.join(workdir, s); };
   const where = workdir === HOME ? "the user's home folder" : `its working folder (${workdir})`;
@@ -1041,6 +1079,96 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       },
     },
     {
+      name: 'add_task',
+      description: 'Add a to-do to the planner, for example "add math homework due Thursday". Pass the title separately from due (a local date or words like "Thursday" or "in 2 weeks"). Optional list name, notes, priority (0 none, 1 low, 2 medium, 3 high), and repeat (daily, weekdays, every other Monday, monthly on the 15th, or an RRULE). For a plain reminder such as "remind me in 20 minutes", use remember_commitment.',
+      parameters: z.object({ title: plannerTitle, due: plannerWhen.optional(), ...plannerFields }),
+      execute: async ({ due, ...fields }) => {
+        const now = Date.now();
+        const item = await planner.add({ ...plannerValues(fields), kind: 'task', start: due === undefined ? null : plannerDate(due, now).start }, now);
+        onPlanner();
+        return `Added ${planner.describeItem(item, now)}.`;
+      },
+    },
+    {
+      name: 'add_event',
+      description: 'Put an appointment or time block on the calendar, for example title "Dentist", when "Tuesday 3 to 4pm". A date by itself is all day. An optional end can be a time or an exclusive all-day end date. Alert is minutes before a timed event (default 10, 0 at start). Optional list, notes, priority (0–3), and repeat (e.g. "weekdays", "every other Monday", or RRULE). Use remember_commitment for plain reminders.',
+      parameters: z.object({ title: plannerTitle, when: plannerWhen, end: plannerWhen.optional(), alert: plannerAlert, ...plannerFields }),
+      execute: async ({ when, end, ...fields }) => {
+        const now = Date.now();
+        const item = await planner.add({ ...plannerValues(fields), ...eventTimes(when, end, now), kind: 'event' }, now);
+        onPlanner();
+        return `Added ${planner.describeItem(item, now)}.`;
+      },
+    },
+    {
+      name: 'update_planner_item',
+      description: 'Change a planner task or a whole event series by id. Pass only changed fields. When is the new due date or event start (it can include a time range). For tasks, "none" clears a due date on a nonrepeating task. For a new event end, use end; all-day ends are exclusive. Use repeat "none" to stop repeating and list "" for the default list.',
+      parameters: z.object({ id: z.string(), title: plannerTitle.optional(), when: plannerWhen.optional(), end: plannerWhen.optional(), alert: plannerAlert, ...plannerFields }),
+      execute: async ({ id, when, end, ...fields }) => {
+        const item = plannerFound(planner.get(id), id);
+        const now = Date.now();
+        const values = plannerValues(fields);
+        if (item.kind === 'task') {
+          if (end !== undefined || fields.alert !== undefined) throw new Error('End and alert are for events.');
+          if (when !== undefined) values.start = when === 'none' ? null : plannerDate(when, now).start;
+        } else Object.assign(values, eventTimes(when, end, now, item.start));
+        const updated = plannerFound(await planner.update(id, values, now), id);
+        onPlanner();
+        return `Updated ${planner.describeItem(updated, now)}.`;
+      },
+    },
+    {
+      name: 'complete_task',
+      description: 'Tick off a planner task by id. A repeating task advances to its next date. Use update_commitment to tick off a commitment instead.',
+      parameters: z.object({ id: z.string() }),
+      execute: async ({ id }) => {
+        const item = plannerFound(await planner.complete(id), id);
+        onPlanner();
+        return item.done ? `Done: ${item.title}.` : `Ticked off. Next: ${planner.describeItem(item)}.`;
+      },
+    },
+    {
+      name: 'delete_planner_item',
+      description: 'Delete a planner task or calendar event by id when asked. For one occurrence of a repeating event, pass occurrence as its local start date and time (or date for all-day). Without occurrence, this deletes the whole series.',
+      parameters: z.object({ id: z.string(), occurrence: plannerWhen.optional() }),
+      execute: async ({ id, occurrence }) => {
+        if (occurrence !== undefined) {
+          const date = plannerDate(occurrence);
+          const event = await planner.skipOccurrence(id, date.start, date.allDay);
+          if (!event) throw new Error('No repeating event occurrence matches that date and time.');
+          onPlanner();
+          return `Skipped ${planner.describeItem(event)}.`;
+        }
+        const item = plannerFound(await planner.remove(id), id);
+        onPlanner();
+        return `Deleted ${item.title}.`;
+      },
+    },
+    {
+      name: 'list_planner',
+      description: 'Read planner tasks and events with ids. Optional list name or kind, overdue for late tasks only, or local dates from and to (to is the last day to include). Defaults to all open tasks and the next seven calendar days of events. Use show_list to display the combined list on screen.',
+      parameters: z.object({
+        from: plannerWhen.optional(), to: plannerWhen.optional(), list: z.string().max(80).optional(),
+        kind: z.enum(['task', 'event']).optional(), overdue: z.boolean().optional(),
+      }),
+      execute: async ({ from, to, list, kind, overdue }) => {
+        const now = Date.now(), today = midnight(now);
+        const first = from === undefined ? null : midnight(plannerDate(from, now).start);
+        const last = to === undefined ? null : midnight(plannerDate(to, now).start);
+        const start = first ?? last ?? today;
+        const end = last == null ? addDays(start, first == null ? 7 : 1) : addDays(last, 1);
+        if (end <= start) throw new Error('The last day must be on or after the first day.');
+        const filters = { cat: list, kind, overdue, now };
+        const items = first != null || last != null || overdue ? planner.list({ ...filters, from: start, to: end })
+          : [...(kind === 'event' ? [] : planner.list({ ...filters, kind: 'task' })),
+            ...(kind === 'task' ? [] : planner.list({ ...filters, kind: 'event', from: start, to: end }))];
+        if (!items.length) return 'Nothing matched in the planner.';
+        const lines = items.slice(0, 15).map((item) => planner.describeItem(item, now));
+        if (items.length > lines.length) lines.push(`${items.length - lines.length} more. Use a narrower date or list filter.`);
+        return lines.join('\n');
+      },
+    },
+    {
       name: 'forget_fact', description: 'Delete a saved fact that is wrong or that the user asks you to forget. Ids are in the memory section of the <live-state> block.',
       parameters: z.object({ id: z.string() }),
       execute: async ({ id }) => { const f = await forgetFact(id); if (!f) throw new Error(`No fact with id ${id}.`); return `Forgot: ${f.text}`; },
@@ -1057,7 +1185,7 @@ A drawing stays until it's cleared, the window changes or the next one replaces 
       execute: async (args) => { onPlan(args); return 'ok'; },
     },
     {
-      name: 'show_list', description: "Show the user their list on screen (reminders and commitments, Today and Later). Use when they ask to see their list, to-dos or reminders; then answer in a few words, don't read it all out.",
+      name: 'show_list', description: "Show the combined list on screen. Today includes tasks due today or overdue and today's calendar events alongside reminders and commitments. Use when they ask to see their list, to-dos or reminders; then answer in a few words.",
       parameters: z.object({}),
       execute: async () => { showList(); return 'The list is on screen.'; },
     },
