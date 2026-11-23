@@ -29,6 +29,8 @@ import {
   touchFacts, forDisk, forProvider, loadLatestSession, newSession, openCommitments, pruneSessions, readJson, saveSession, takeDueReminders, updateCommitment, writeJson,
 } from './store.mjs';
 import * as planner from './planner.mjs';
+import * as habits from './habits.mjs';
+import * as coach from './coach.mjs';
 import { createGoogleSync } from './googlesync.mjs';
 import { createFeeds } from './feeds.mjs';
 import { act as plannerAct, clampWeek, plannerStamp, plannerView, preview as plannerPreview } from './plannerview.mjs';
@@ -143,6 +145,8 @@ const DEFAULTS = {
   onboarded: false, onboardStep: 0, filesAsked: false, keys: DEFAULT_KEYS, muteWhileTalking: true, volume: 100, autoListen: false, listenEvery: false, listenSecs: 8, lite: false, wakeWord: false, setupVersion: 0, size: 'default', look: 'classic', introDone: false,
   replies: 'text', // 'voice': spoken (with Fish Audio or Gemini) as well as shown
   quietHours: { ...DEFAULT_QUIET }, // nightly window: reminders still show, but nothing is spoken or nudged
+  rollover: '21:30', // evening review card ("" = off)
+  escalate: true, // remind about tasks due tonight
   speechLang: 'auto', // the language talking is recognised in (macOS): 'auto' follows the Mac's language list, or a locale like 'ar-SA'
   tts: 'fish', // which one speaks: 'fish' (Fish Audio), 'gemini' or 'voicestudio' (the VoiceStudio app on this computer)
   studioSpeak: 'short', // how much VoiceStudio says out loud: 'short', 'medium' or 'full' (it renders slower than real time)
@@ -1868,7 +1872,7 @@ async function answerHere(text) {
   let line = '';
   const done = await quick(text, {
     say: (l) => { line = l; speakLine(l); },
-    showList: () => showList({ seconds: 20 }), onReminder: commitmentsChanged, open: quickOpen, stat: (p) => fs.stat(p),
+    showList: () => showList({ seconds: 20 }), onReminder: commitmentsChanged, onHabit: panel, open: quickOpen, stat: (p) => fs.stat(p),
   });
   if (!done) return false;
   await resumed;
@@ -2469,6 +2473,7 @@ function panelState() {
     skills: listSkills().map((k) => ({ slug: k.slug, name: k.name, description: k.description })), learnSkills: config.learnSkills !== false,
     commitments: openCommitments().map((c) => ({ id: c.id, text: c.text, due: c.due ?? null, when: c.due ? `${fmtWhen(c.due)}${c.repeat ? ` · repeats ${repeatLabel(c.repeat)}` : ''}` : '', overdue: !!(c.due && c.due < Date.now()), repeat: c.repeat ?? null })),
     planner: plannerPanel(),
+    habits: habits.view(),
     look: config.look ?? 'classic', looks: LOOKS.map(([id, label]) => [id, label]), name: lookName(),
     size: sizeNow(), sizes: SIZES,
     replies: VOICE_ON() ? 'voice' : 'text', tts: tts().id, fishKey: hasVoiceKey('fish'), geminiKey: hasVoiceKey('gemini'),
@@ -3249,6 +3254,25 @@ function scheduleReminders() {
   }, wait);
 }
 scheduleReminders();
+
+// Coach (habits): evening rollover, due-tonight escalation, respect quiet hours.
+let coachRunning = false;
+async function coachTick() {
+  if (coachRunning || busy || queued || loggingIn || onboarding || !config.onboarded) return;
+  coachRunning = true;
+  const notices = [];
+  try {
+    await coach.tick(config, new Date(), { say: (t) => notices.push(t), notice: (t) => notices.push(t) });
+    if (!busy && !queued && !quietNow() && notices.length) speakLine(notices.join(' '));
+  } catch (e) {
+    console.error('coach', e);
+  } finally {
+    coachRunning = false;
+  }
+}
+const coachTimer = setInterval(() => { coachTick().catch(() => {}); }, 60_000);
+coachTimer.unref();
+coachTick().catch(() => {});
 
 let googleTimer;
 function queueGoogleSync(delay = 2000) {

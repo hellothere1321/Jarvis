@@ -53,6 +53,7 @@ export function append(entry) {
   const row = {
     itemId: typeof entry.itemId === 'string' && entry.itemId ? entry.itemId : null,
     title: String(entry.title ?? '').trim().slice(0, 120),
+    app: typeof entry.app === 'string' && entry.app ? entry.app.trim().slice(0, 120) : (entry.app ?? null),
     start, end, minutes: Math.round(minutes),
   };
   return change((rows) => [...rows, row]);

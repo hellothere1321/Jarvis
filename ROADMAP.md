@@ -11,7 +11,7 @@
 - [x] Track focus time and honor quiet hours.
 - [x] Record and transcribe meetings on Windows, correct names, and summarize on request.
 - [x] Fill vault logins on the saved site.
-- [ ] Connect daily habits and coach nudges to the app.
+- [x] Add daily habit commands and coach reminders that respect quiet hours.
 - [ ] Import VowenLite data with a dry run and a repeatable merge.
 - [ ] Verify the Windows upgrade and backup before retiring VowenLite.
 

@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { addCommitment, parseDue, parseRepeat, repeatLabel } from './store.mjs';
 import { SAFE, checkLink, checkOpen } from './safety.mjs';
+import * as habits from './habits.mjs';
 
 // ---------- the words ----------
 const clean = (text) => {
@@ -290,6 +291,12 @@ function reminderMatch(s, now) {
 // ---------- the list ----------
 const LIST = /^(?:(?:show|open|pull up|bring up|display|view|see|check)(?: me)? (?:my|the) (?:list|to-?do list|todo list|to-?dos|reminders)|what(?:'s| is| are) on my (?:list|to-?do list|todo list|reminders)|what are my (?:reminders|to-?dos)|show (?:the |my )?list)$/i;
 
+// ---------- habits ----------
+const HABIT_LIST = /^(?:(?:show|open|pull up|bring up|display|view|see|check)(?: me)? (?:my|the) habits|what(?:'s| is| are) on my habits|list habits|show habits|habits)$/i;
+const HABIT_ADD = /^(?:(?:add|new|create|track|start)(?: a)? habit (?:to |for )?(.+)|habit add (.+))$/i;
+const HABIT_CHECK = /^(?:(?:check|tick|done|complete)(?: off)? habit (.+)|habit (?:check|tick|done) (.+))$/i;
+const HABIT_UNCHECK = /^(?:(?:uncheck|untick|undo) habit (.+)|habit (?:uncheck|untick|undo) (.+))$/i;
+
 // ---------- opening things and searching ----------
 const SITES = { youtube: 'https://www.youtube.com', gmail: 'https://mail.google.com', github: 'https://github.com', reddit: 'https://www.reddit.com',
   netflix: 'https://www.netflix.com', google: 'https://www.google.com', wikipedia: 'https://www.wikipedia.org', twitter: 'https://twitter.com',
@@ -349,6 +356,11 @@ export function match(text, { now = new Date(), home = os.homedir(), platform = 
   if (DAY.test(s)) return { kind: 'day', args: {}, reply: `It's ${DAYNAMES[now.getDay()][0].toUpperCase()}${DAYNAMES[now.getDay()].slice(1)}.` };
   if (DATE.test(s)) return { kind: 'date', args: {}, reply: `Today is ${now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}.` };
   if (LIST.test(s)) return { kind: 'list', args: {}, reply: "Here's your list." };
+  if (HABIT_LIST.test(s)) return { kind: 'habit-list', args: {}, reply: "Here are your habits." };
+  let hm;
+  if ((hm = HABIT_ADD.exec(s))) return { kind: 'habit-add', args: { title: (hm[1] ?? hm[2] ?? '').trim() }, reply: `Added the habit ${(hm[1] ?? hm[2] ?? '').trim()}.` };
+  if ((hm = HABIT_CHECK.exec(s))) return { kind: 'habit-check', args: { name: (hm[1] ?? hm[2] ?? '').trim() }, reply: `Checked off ${(hm[1] ?? hm[2] ?? '').trim()}.` };
+  if ((hm = HABIT_UNCHECK.exec(s))) return { kind: 'habit-uncheck', args: { name: (hm[1] ?? hm[2] ?? '').trim() }, reply: `Unchecked ${(hm[1] ?? hm[2] ?? '').trim()}.` };
   return timerMatch(s) ?? reminderMatch(s, now) ?? searchMatch(s) ?? openMatch(s, { home, platform }) ?? convertMatch(s) ?? mathMatch(s);
 }
 
@@ -378,6 +390,27 @@ export async function run(m, deps) {
   switch (m.kind) {
     case 'time': case 'date': case 'day': case 'math': case 'convert': return say(m.reply);
     case 'list': deps.showList?.(); return say(m.reply);
+    case 'habit-list': {
+      deps.showHabits?.();
+      const rows = habits.view(deps.now ?? Date.now());
+      return say(rows.length ? rows.map((h) => `${h.title} (${h.doneToday ? 'done' : h.dueToday ? 'due' : 'not scheduled'})`).join(', ') : 'No habits yet.');
+    }
+    case 'habit-add': {
+      const title = String(m.args.title ?? '').trim();
+      if (!title) return false;
+      try { const h = await habits.add({ title }, deps.now ?? new Date()); deps.onHabit?.(h); } catch (e) { return say(String(e?.message ?? e)); }
+      return say(m.reply);
+    }
+    case 'habit-check': case 'habit-uncheck': {
+      const name = String(m.args.name ?? '').trim();
+      if (!name) return false;
+      const all = habits.list();
+      const found = all.find((h) => h.id === name || h.title.toLowerCase() === name.toLowerCase()) ||
+        all.find((h) => h.title.toLowerCase().includes(name.toLowerCase()));
+      if (!found) return say(`No habit matching ${name}.`);
+      try { await habits.checkIn(found.id, { done: m.kind === 'habit-check', now: deps.now ?? new Date() }); deps.onHabit?.(found); } catch (e) { return say(String(e?.message ?? e)); }
+      return say(m.reply);
+    }
     case 'timer': case 'reminder': {
       const c = await addCommitment(m.args.text, m.kind === 'timer' ? Date.now() + m.args.secs * 1000 : m.args.dueMs, 'reminder', m.args.repeat);
       deps.onReminder?.(c);
