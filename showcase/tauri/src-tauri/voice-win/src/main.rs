@@ -294,9 +294,13 @@ struct Voice {
     dictation_result: Option<Receiver<String>>,
     #[cfg(windows)]
     dictated_text: Option<String>,
-    // Right Ctrl and the Copilot key (talkkeys.rs): hold to talk, double-tap to type.
+    // Configurable single-key gestures. The hook watches only keys with an active binding.
     #[cfg(windows)]
     talk_keys: Option<talkkeys::Keyboard>,
+    #[cfg(windows)]
+    talk_bindings: talkkeys::Bindings,
+    #[cfg(windows)]
+    active_bindings: talkkeys::Bindings,
     #[cfg(windows)]
     taps: talkkeys::Taps,
     /// This push-to-talk take is held by one of those keys, not the chord: its release (not the chord's) sends.
@@ -367,6 +371,10 @@ impl Voice {
             dictated_text: None,
             #[cfg(windows)]
             talk_keys: None,
+            #[cfg(windows)]
+            talk_bindings: talkkeys::Bindings::default(),
+            #[cfg(windows)]
+            active_bindings: talkkeys::Bindings::default(),
             #[cfg(windows)]
             taps: talkkeys::Taps::default(),
             key_talk: false,
@@ -532,17 +540,16 @@ impl Voice {
     }
 
     #[cfg(windows)]
-    fn watch_talk_keys(&mut self) {
-        if self.talk_keys.is_none() {
-            self.talk_keys = talkkeys::Keyboard::watch();
+    fn apply_talk_bindings(&mut self, input: bool) {
+        let bindings = if input { self.talk_bindings } else { talkkeys::Bindings::default() };
+        if self.test_audio.is_some() || bindings == self.active_bindings {
+            return;
         }
-    }
-
-    /// Presses that came in while voice input was off (meeting-only) are dropped, not acted on later.
-    #[cfg(windows)]
-    fn drop_talk_keys(&mut self) {
-        while self.talk_keys.as_ref().and_then(talkkeys::Keyboard::next).is_some() {}
-        self.taps = talkkeys::Taps::default();
+        if self.key_talk { self.cancel(); }
+        self.talk_keys = None;
+        self.active_bindings = bindings;
+        self.taps = talkkeys::Taps::new(bindings);
+        self.talk_keys = talkkeys::Keyboard::watch(bindings);
     }
 
     #[cfg(windows)]
@@ -904,6 +911,7 @@ impl Voice {
     }
 
     fn cancel(&mut self) {
+        self.key_talk = false;
         self.stop_audio();
         self.buf.lock().unwrap().clear();
         self.tail_until = None;
@@ -1217,6 +1225,13 @@ fn handle_event(voice: &mut Voice, recorder: &mut meeting::capture::Recorder, in
                     voice.cancel();
                 }
                 *input = enabled;
+                voice.apply_talk_bindings(enabled);
+                return false;
+            }
+            Some("single_keys") => {
+                let pick = |key| cmd[key].as_str().and_then(talkkeys::Which::from_name);
+                voice.talk_bindings = talkkeys::Bindings { hold: pick("hold"), write: pick("write") };
+                voice.apply_talk_bindings(*input);
                 return false;
             }
             Some("listen" | "toggle" | "wake" | "dictate") if !*input => return false,
@@ -1299,8 +1314,14 @@ fn main() {
         voice.set_dictation(true);
     }
     #[cfg(windows)]
-    if voice.test_audio.is_none() {
-        voice.watch_talk_keys();
+    let mut input = !args.iter().any(|a| a == "--meeting-only");
+    #[cfg(windows)]
+    {
+        voice.talk_bindings = talkkeys::Bindings {
+            hold: arg(&args, "--hold-key").as_deref().and_then(talkkeys::Which::from_name),
+            write: arg(&args, "--write-key").as_deref().and_then(talkkeys::Which::from_name),
+        };
+        voice.apply_talk_bindings(input);
     }
 
     let stdin_tx = tx.clone();
@@ -1316,8 +1337,6 @@ fn main() {
     emit(json!({ "type": "ready", "engine": "parakeet", "model": voice.engine.is_some() }));
     #[cfg(windows)]
     let mut recorder = meeting::capture::Recorder::default();
-    #[cfg(windows)]
-    let mut input = !args.iter().any(|a| a == "--meeting-only");
     loop {
         let quit = match rx.recv_timeout(Duration::from_millis(16)) {
             Ok(ev) => {
@@ -1339,7 +1358,6 @@ fn main() {
         }
         #[cfg(windows)]
         if !input {
-            voice.drop_talk_keys();
             continue;
         }
         voice.tick();

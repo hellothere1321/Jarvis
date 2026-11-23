@@ -1,4 +1,4 @@
-// The agents' home: a small panel in the top-right corner of the overlay with a row for each background agent
+// The agents' home: a small panel in the bottom-right corner of the overlay with a row for each background agent
 // (its mini, what it's doing, how long, Stop), Allow / Don't allow when one waits for a yes, and, when one finishes,
 // a "made" shelf under it with what it made as tiles that open with one click. Same frame, glass and type as the
 // research card (agent-panel.js) and the ask field (ask-bar.js). Minis are drawn by minis.js.
@@ -10,11 +10,10 @@
   // Its top-left for its size [w, h] inside the safe area { top, right, bottom, left } of a [w, h] viewport.
   R.agentHomePlace = (size, safe, view) => {
     const s = safe ?? { top: 0, right: 0, bottom: 0, left: 0 };
-    return [Math.round(Math.max(s.left + INSET, view[0] - s.right - INSET - size[0])), Math.round(s.top + INSET)];
+    return [Math.round(Math.max(s.left + INSET, view[0] - s.right - INSET - size[0])), Math.round(Math.max(s.top + INSET, view[1] - s.bottom - INSET - size[1]))];
   };
   // The made panel's open button: where it worked (a folder, a file, a page), else its files; null for neither.
   R.agentOpenLabel = (result) => {
-    if (result?.widget) return 'Open widget';
     const kind = result?.place?.kind;
     if (kind) return { folder: 'Open folder', file: 'Open file', url: 'Open page' }[kind] ?? null;
     return result?.files?.length ? 'Open folder' : null;
@@ -358,7 +357,7 @@
       const foot = mk('div', 'ahs-foot'), open = mk('button', 'ahs-chip', label);
       open.type = 'button';
       if (a.result?.place?.name) open.title = a.result.place.name;
-      open.addEventListener('click', () => send({ type: a.result?.widget ? 'agent_widget' : 'agent_folder', id: a.id }));
+      open.addEventListener('click', () => send({ type: 'agent_folder', id: a.id }));
       foot.append(open);
       if (!files.length) foot.style.paddingTop = '10px';
       inner.append(foot);
@@ -490,7 +489,9 @@
       if (e.type === 'done') {
         S('done');
         say(`${a.title} is done. ${a.result?.outcome ?? ''}`);
-        if (row) { if (armed === row) disarm(); row.agent = a; row.x.style.visibility = 'hidden'; row.ask.classList.remove('open'); row.status.textContent = 'Done'; removeRow(row, 'done');
+        if (row) { if (armed === row) disarm(); row.agent = a; row.x.style.visibility = 'hidden'; row.ask.classList.remove('open'); row.status.textContent = 'Done'; removeRow(row, 'done'); }
+        if (!a.result?.files?.length && !a.result?.place && !a.result?.needs_you) return;
+        if (row) {
           // The last one out: its shelf takes the home's place as the home goes, so older shelves move just once.
           if (anyLive()) setTimeout(() => addShelf(a), reduce() ? 300 : 1100);
           else { nextShelves.push(a); setTimeout(() => glide(flushShelves), reduce() ? 700 : 1800); } }
@@ -526,15 +527,14 @@
   R.homeHit = (x, y) => visibleRects().some(([l, t, w, h]) => x >= l && x <= l + w && y >= t && y <= t + h);
   // Linux: part of the window's click shape (host.js).
   R.homeRects = () => visibleRects();
-  // Top right of the screen this overlay is on, inside its safe area; again when it moves to another screen.
+  // Bottom right of the screen this overlay is on, inside its safe area.
   const place = () => {
+    const room = innerHeight - (R.safe?.top ?? 0) - (R.safe?.bottom ?? 0) - 2 * INSET;
+    while (shelves.length > 1 && col.offsetHeight > room) { const s = shelves.pop(); s.el.remove(); }
     const [x, y] = R.agentHomePlace([col.offsetWidth || 300, col.offsetHeight], R.safe, [innerWidth, innerHeight]);
     col.style.transform = `translate(${x}px, ${y}px)`;
-    // A short screen: the oldest shelves go rather than running off its bottom.
-    const room = innerHeight - (R.safe?.bottom ?? 0) - INSET - y;
-    while (shelves.length > 1 && col.offsetHeight > room) { const s = shelves.pop(); s.el.remove(); }
   };
   addEventListener('resize', place);
-  setInterval(place, 1000);
+  new ResizeObserver(place).observe(col);
   place();
 })();

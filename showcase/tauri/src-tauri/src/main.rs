@@ -1859,201 +1859,6 @@ async fn tokio_sleep(d: Duration) {
     let _ = tauri::async_runtime::spawn_blocking(move || thread::sleep(d)).await;
 }
 
-// ---------- generated widget windows ----------
-
-const WIDGET_PAGE: &str = "widget/index.html";
-const WIDGET_PREFIX: &str = "widget-";
-const WIDGET_MAX_BYTES: u64 = 2 * 1024 * 1024;
-
-// WebView2 injects even Tauri's main-frame scripts into child frames. Disable invoke before
-// Tauri's core script publishes it in an opaque, sandboxed document.
-const SANDBOX_IPC_GUARD: &str = r#"
-    if (window.top !== window && window.origin === 'null') {
-        // Every way in: invoke, the raw postMessage it is built on, and WebView2's window.ipc.
-        for (const k of ['invoke', 'postMessage']) try { Object.defineProperty(window.__TAURI_INTERNALS__, k, { value: undefined }); } catch {}
-        for (const k of ['__TAURI__', 'ipc']) try { Object.defineProperty(window, k, { value: undefined }); } catch {}
-    }
-"#;
-
-#[derive(Default)]
-struct Widgets(Mutex<std::collections::HashMap<String, Value>>);
-
-fn read_widget(home: &std::path::Path, folder: &str) -> std::io::Result<String> {
-    use std::io::{Error, ErrorKind, Read};
-    use std::path::Component;
-
-    let denied = || Error::new(ErrorKind::PermissionDenied, "Widget path is outside its agent folder");
-    let mut parts = std::path::Path::new(folder).components();
-    if !matches!(parts.next(), Some(Component::Normal(name)) if name == folder)
-        || parts.next().is_some()
-        || folder.contains(['/', '\\', ':'])
-    {
-        return Err(denied());
-    }
-    let target = home.canonicalize()?.join("Roamies").join("Agents").join(folder).join("files").join("widget.html");
-    let resolved = target.canonicalize()?;
-    // Require the exact file. This rejects escapes through the Agents root, agent, files, or HTML itself.
-    if resolved != target || !resolved.metadata()?.is_file() {
-        return Err(denied());
-    }
-    let mut html = String::new();
-    std::fs::File::open(resolved)?.take(WIDGET_MAX_BYTES + 1).read_to_string(&mut html)?;
-    if html.is_empty() || html.len() as u64 > WIDGET_MAX_BYTES {
-        return Err(Error::new(ErrorKind::InvalidData, "Widget HTML must be between 1 byte and 2 MB"));
-    }
-    Ok(html)
-}
-
-#[tauri::command]
-fn widget_html(window: WebviewWindow, widgets: tauri::State<'_, Widgets>) -> Result<Value, &'static str> {
-    // The IPC caller supplies no path or label. Its window only sees its own validated snapshot.
-    widgets.0.lock().unwrap().get(window.label()).cloned().ok_or("Widget is unavailable")
-}
-
-#[tauri::command]
-fn widget_control(window: WebviewWindow, action: &str) -> Result<(), String> {
-    if !window.label().starts_with(WIDGET_PREFIX) {
-        return Err("Widget controls require a widget window".into());
-    }
-    match action {
-        "close" => window.close(),
-        "drag" => window.start_dragging(),
-        _ => return Err("Unknown widget control".into()),
-    }
-    .map_err(|e| e.to_string())
-}
-
-fn open_widget(app: &AppHandle, args: &Value) {
-    let (Some(id), Some(folder), Some(title)) = (args["id"].as_str(), args["folder"].as_str(), args["title"].as_str()) else { return };
-    if id.len() != 4 || !id.starts_with('a') || !id.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
-        return;
-    }
-    let home = std::env::var_os("ROAMIES_DATA_DIR").filter(|p| !p.is_empty()).map(PathBuf::from).or_else(|| app.path().home_dir().ok());
-    let Some(home) = home else { return };
-    let html = match read_widget(&home, folder) {
-        Ok(html) => html,
-        Err(e) => { eprintln!("widget {id}: {e}"); return; }
-    };
-    let label = format!("{WIDGET_PREFIX}{id}");
-    let data = json!({ "html": html, "title": title });
-    let app = app.clone();
-    let ui_app = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        if let Err(e) = show_widget(&ui_app, &label, data) {
-            ui_app.state::<Widgets>().0.lock().unwrap().remove(&label);
-            eprintln!("{label}: {e}");
-        }
-    });
-}
-
-fn show_widget(app: &AppHandle, label: &str, data: Value) -> tauri::Result<()> {
-    let widgets = app.state::<Widgets>();
-    let changed = widgets.0.lock().unwrap().insert(label.into(), data.clone()).as_ref() != Some(&data);
-    if let Some(w) = app.get_webview_window(label) {
-        if changed { let _ = w.reload(); }
-        let _ = w.unminimize();
-        let _ = w.show();
-        let _ = w.set_focus();
-        return Ok(());
-    }
-
-    let (width, height) = (360.0_f64, 480.0_f64);
-    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App(WIDGET_PAGE.into()))
-        .title(data["title"].as_str().unwrap_or("Widget"))
-        .inner_size(width, height)
-        .min_inner_size(240.0, 200.0)
-        .decorations(false)
-        .resizable(true)
-        .skip_taskbar(false)
-        .accept_first_mouse(true)
-        .on_web_resource_request(|request, response| {
-            if request.uri().path() == "/widget/index.html" {
-                use tauri::http::HeaderValue;
-                let headers = response.headers_mut();
-                // Chromium's connection allowlist also covers WebRTC, which CSP fetch rules don't cover.
-                headers.insert("connection-allowlist", HeaderValue::from_static(
-                    r#"(response-origin "http://ipc.localhost/*" "https://ipc.localhost/*");webrtc=block"#,
-                ));
-                headers.insert("x-dns-prefetch-control", HeaderValue::from_static("off"));
-                headers.insert("permissions-policy", HeaderValue::from_static("camera=(), microphone=(), geolocation=(), display-capture=()"));
-            }
-        })
-        // Older webviews may ignore the connection allowlist. These APIs bypass ordinary CSP fetch rules.
-        .initialization_script_for_all_frames(r#"
-            if (window.top !== window) {
-                for (const api of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'SpeechRecognition', 'webkitSpeechRecognition']) {
-                    Object.defineProperty(window, api, { value: undefined, configurable: false, writable: false });
-                }
-            }
-        "#)
-        .on_navigation(|url| {
-            // WebKit also reports navigation of the sandboxed child; WebView2's event is top-level only.
-            #[cfg(not(windows))]
-            if matches!(url.as_str(), "about:blank" | "about:srcdoc") {
-                return true;
-            }
-            matches!((url.scheme(), url.host_str()), ("tauri", Some("localhost")) | ("http" | "https", Some("tauri.localhost")))
-                && url.path() == "/widget/index.html"
-                && url.port().is_none()
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.query().is_none()
-        })
-        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
-    if let Some(monitor) = app.primary_monitor()? {
-        let work = monitor.work_area();
-        let scale = monitor.scale_factor();
-        let work_width = f64::from(work.size.width) / scale;
-        let work_height = f64::from(work.size.height) / scale;
-        let width = width.min(work_width);
-        let height = height.min(work_height);
-        builder = builder.inner_size(width, height).position(
-            f64::from(work.position.x) / scale + (work_width - width) / 2.0,
-            f64::from(work.position.y) / scale + (work_height - height) / 2.0,
-        );
-    }
-    let w = builder.build()?;
-    let app = app.clone();
-    let label = label.to_owned();
-    w.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Destroyed) {
-            app.state::<Widgets>().0.lock().unwrap().remove(&label);
-        }
-    });
-    Ok(())
-}
-
-#[cfg(test)]
-#[test]
-fn widget_reads_only_the_agent_html() {
-    use std::fs;
-    let dir = std::env::temp_dir().join(format!("roamies-widget-{}", std::process::id()));
-    let agents = dir.join("Roamies").join("Agents");
-    let files = agents.join("Example widget").join("files");
-    fs::create_dir_all(&files).unwrap();
-    fs::write(files.join("widget.html"), "<p>Widget</p>").unwrap();
-    let result = read_widget(&dir, "Example widget");
-    let traversal = read_widget(&dir, "../Agents/Example widget");
-    let absolute = read_widget(&dir, files.to_str().unwrap());
-    let outside = dir.join("outside");
-    fs::create_dir_all(&outside).unwrap();
-    fs::write(outside.join("widget.html"), "<p>Outside</p>").unwrap();
-    let linked = agents.join("Linked").join("files");
-    fs::create_dir_all(linked.parent().unwrap()).unwrap();
-    #[cfg(windows)]
-    let linked_created = std::os::windows::fs::symlink_dir(&outside, &linked).is_ok();
-    #[cfg(unix)]
-    let linked_created = std::os::unix::fs::symlink(&outside, &linked).is_ok();
-    let link = linked_created.then(|| read_widget(&dir, "Linked"));
-    fs::remove_dir_all(dir).unwrap();
-    assert_eq!(result.unwrap(), "<p>Widget</p>");
-    assert_eq!(traversal.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
-    assert_eq!(absolute.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
-    if let Some(link) = link {
-        assert_eq!(link.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
-    }
-}
-
 fn handle_sidecar(app: &AppHandle, msg: Value) {
     match msg.get("type").and_then(Value::as_str) {
         Some("update") => update(app, msg.get("install").and_then(Value::as_bool) == Some(true)),
@@ -2074,7 +1879,6 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
             }
         }
         Some("panel_show") => show_panel(app, None, false),
-        Some("open_widget") => open_widget(app, &msg["widget"]),
         Some("diagnostics") => {
             let app = app.clone();
             thread::spawn(move || to_sidecar(&app, &diagnostics(&app)));
@@ -2109,10 +1913,13 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
                 }
             }
             #[cfg(windows)]
-            match msg.get("dictate") {
-                Some(Value::Null) => voice::set_dictation(app, false),
-                Some(Value::String(key)) if key == "rshift" => voice::set_dictation(app, true),
-                _ => {}
+            {
+                voice::set_single_keys(app, &msg);
+                match msg.get("dictate") {
+                    Some(Value::Null) => voice::set_dictation(app, false),
+                    Some(Value::String(key)) if key == "rshift" => voice::set_dictation(app, true),
+                    _ => {}
+                }
             }
             // The type-to-ask pair; none sent (Wayland) switches the tap off.
             let write = msg.get("write").and_then(Value::as_array).and_then(|m| {
@@ -2222,10 +2029,18 @@ fn second_launch(app: &AppHandle, args: &[String]) {
     }
 }
 
+// WebView2 can inject Tauri's IPC into child frames. Opaque-origin documents receive no bridge.
+const SANDBOX_IPC_GUARD: &str = r#"
+    if (window.top !== window && window.origin === 'null') {
+        for (const k of ['invoke', 'postMessage']) try { Object.defineProperty(window.__TAURI_INTERNALS__, k, { value: undefined }); } catch {}
+        for (const k of ['__TAURI__', 'ipc']) try { Object.defineProperty(window, k, { value: undefined }); } catch {}
+    }
+"#;
+
 fn main() {
     #[cfg(target_os = "linux")]
     linux::init();
-    let invoke: fn(tauri::ipc::Invoke<Wry>) -> bool = tauri::generate_handler![buddy, ink_wait, set_hot, set_hit_rects, sidecar_send, set_typing, perm_status, perm_request, perm_guide, screen_check, open_settings, onboarding_finish, guide_close, panel_hide, esc_watch, relaunch, focus_guide, guide_aside, drag_window, widget_html, widget_control];
+    let invoke: fn(tauri::ipc::Invoke<Wry>) -> bool = tauri::generate_handler![buddy, ink_wait, set_hot, set_hit_rects, sidecar_send, set_typing, perm_status, perm_request, perm_guide, screen_check, open_settings, onboarding_finish, guide_close, panel_hide, esc_watch, relaunch, focus_guide, guide_aside, drag_window];
     tauri::Builder::default()
         .append_invoke_initialization_script(SANDBOX_IPC_GUARD)
         // Must be the first plugin. A second launch (say, straight from the DMG) quits and tells this one what it wanted.
@@ -2240,16 +2055,7 @@ fn main() {
         .manage(TalkChord(Mutex::new(vec!["control".into(), "option".into()])))
         .manage(VoiceModel(Mutex::new(None)))
         .manage(PermGuide(Mutex::new(None)))
-        .manage(Widgets::default())
-        .invoke_handler(move |request| {
-            let from_widget = request.message.webview_ref().label().starts_with(WIDGET_PREFIX);
-            let widget_command = matches!(request.message.command(), "widget_html" | "widget_control");
-            if from_widget != widget_command {
-                request.resolver.reject("Command is unavailable in this window");
-                return true;
-            }
-            invoke(request)
-        })
+        .invoke_handler(invoke)
         .on_menu_event(|app, e| match e.id.as_ref() {
             "quit" => app.exit(0),
             "restart" => spawn_sidecar(app),

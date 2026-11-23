@@ -286,12 +286,16 @@ html, body { height: 100%; background: transparent; }
 
 /* ---------- settings ---------- */
 .setting { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 32px; }
+.setting:has(> .row-btns) { grid-template-columns: minmax(min(9em, 42%), 1fr) minmax(0, auto); }
+.setting > .row-btns { flex-wrap: wrap; justify-content: flex-end; align-items: center; }
+.setting > .quiet-times { grid-column: 1 / -1; justify-content: flex-start; }
+.quiet-times input { max-width: 100%; min-width: 0; }
 /* A dropdown shrinks before its label does: OpenRouter's long model names squashed the labels to a letter (#124). */
 .setting:has(> .field.select) { grid-template-columns: minmax(min(9em, 45%), 1fr) auto; }
 .setting > .field.select { min-width: 0; }
 .setting > .field.select select { width: 100%; text-overflow: ellipsis; }
 .setting > span { min-width: 0; font-size: var(--t-body); line-height: 1.35; color: var(--ink); }
-.setting > span small { display: block; font-size: var(--t-small); line-height: 1.35; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.setting > span small { display: block; font-size: var(--t-small); line-height: 1.35; color: var(--ink-3); overflow-wrap: anywhere; }
 .setting .link { white-space: nowrap; }
 .picks { display: flex; flex-wrap: wrap; gap: 6px; }
 .picks .chord { padding: 4px; }

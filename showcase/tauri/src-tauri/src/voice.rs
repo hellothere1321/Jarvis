@@ -23,6 +23,20 @@ static MEETING_ACTIVE: AtomicBool = AtomicBool::new(false);
 static MEETING_REQUEST: Mutex<Option<Value>> = Mutex::new(None);
 
 #[cfg(windows)]
+static SINGLE_KEYS: Mutex<(Option<String>, Option<String>)> = Mutex::new((None, None));
+
+#[cfg(windows)]
+pub(crate) fn set_single_keys(app: &AppHandle, msg: &Value) {
+    let key = |name| msg.get(name).and_then(Value::as_str).map(str::to_owned);
+    let (hold, write) = (key("singleHold"), key("singleWrite"));
+    let mut current = SINGLE_KEYS.lock().unwrap();
+    if *current != (hold.clone(), write.clone()) {
+        *current = (hold, write);
+        to_voice(app, &json!({ "cmd": "single_keys", "hold": current.0, "write": current.1 }));
+    }
+}
+
+#[cfg(windows)]
 pub(crate) fn set_dictation(app: &AppHandle, enabled: bool) {
     DICTATION_ENABLED.store(enabled, Ordering::Relaxed);
     let key = enabled.then_some("rshift");
@@ -74,6 +88,10 @@ pub(crate) fn start_voice(app: &AppHandle) {
     cmd.arg("--chord").arg(chord);
     #[cfg(windows)]
     {
+        let keys = SINGLE_KEYS.lock().unwrap();
+        for (arg, key) in [("--hold-key", &keys.0), ("--write-key", &keys.1)] {
+            if let Some(key) = key { cmd.arg(arg).arg(key); }
+        }
         if !VOICE_ENABLED.load(Ordering::Relaxed) {
             cmd.arg("--meeting-only");
         } else if DICTATION_ENABLED.load(Ordering::Relaxed) {
@@ -428,7 +446,7 @@ fn handle_voice(app: &AppHandle, msg: Value) {
     if msg.get("type").and_then(Value::as_str) == Some("dictate") {
         return;
     }
-    // A double tap of Right Ctrl or the Copilot key: the same as the type-to-ask tap (not during setup).
+    // The configured single-key double tap: the same as the type-to-ask chord (not during setup).
     if msg.get("type").and_then(Value::as_str) == Some("write_tap") {
         if !ONBOARDING.load(Ordering::Relaxed) {
             to_sidecar(app, &msg);

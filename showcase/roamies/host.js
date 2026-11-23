@@ -33,12 +33,20 @@
     return;
   }
 
-  const typing = (on) => invoke('set_typing', { on }).catch(() => {});
+  let askTyping = false, widgetTyping = false, keyboard = false;
+  const syncTyping = (refocus = false) => {
+    const on = askTyping || widgetTyping;
+    if (on === keyboard && !refocus) return;
+    keyboard = on;
+    invoke('set_typing', { on }).catch(() => {});
+  };
+  const typing = (on) => { askTyping = on; syncTyping(on); };
+  if (Roamie.widgets) Roamie.widgets.setTyping = (on) => { widgetTyping = on; syncTyping(); };
   // Drawings (ink.js) talk to the sidecar (started, waits done, buttons, closed cards) and arm the shell's click watch.
   if (Roamie.ink) { Roamie.ink.send = send; Roamie.ink.invoke = (cmd, args) => invoke(cmd, args).catch(() => {}); }
   window.__roamieClick = (x, y) => Roamie.ink?.click(x, y);
 
-  window.__roamieSafe = (s) => Roamie.setSafe?.(s);
+  window.__roamieSafe = (s) => { Roamie.setSafe?.(s); Roamie.widgets?.position(s); };
   // macOS: the voice helper can draw the cursor-form sidekick while it just follows the cursor (agent.js nativeStep,
   // voice/buddy.swift). Not available (Windows, helper not running): the page keeps drawing it.
   let buddyOff = /Mac/.test(navigator.platform) ? 0 : Infinity;

@@ -1,4 +1,4 @@
-// Right Ctrl and the Copilot key, each on its own: hold to talk (letting go sends), double-tap to type a question.
+// Single-key gestures: hold to talk (letting go sends), double-tap to type a question.
 // A hook sees every press, so quick taps between the talk loop's polls aren't missed. The Copilot key sends
 // Win+Shift+F23: its F23 is swallowed so Windows doesn't open Copilot, and a no-op key is sent while Win is still down
 // so letting go of Win doesn't open Start (AutoHotkey's "menu mask key").
@@ -13,8 +13,34 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Which {
+    LeftCtrl,
     RightCtrl,
+    LeftShift,
     Copilot,
+}
+
+impl Which {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "lctrl" => Some(Self::LeftCtrl),
+            "rctrl" => Some(Self::RightCtrl),
+            "lshift" => Some(Self::LeftShift),
+            "copilot" => Some(Self::Copilot),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Bindings {
+    pub hold: Option<Which>,
+    pub write: Option<Which>,
+}
+
+impl Bindings {
+    fn uses(self, key: Which) -> bool {
+        self.hold == Some(key) || self.write == Some(key)
+    }
 }
 
 #[derive(Debug)]
@@ -38,12 +64,13 @@ pub enum Action {
     Write,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
 enum State {
+    #[default]
     Up,
-    Down { which: Which, since: f64 },
+    Down { which: Which, since: f64, second: bool },
     Talking(Which),
-    /// Part of a shortcut, or the second tap: nothing until it comes up.
+    /// Part of a shortcut or held too long: nothing until it comes up.
     Spoiled,
 }
 
@@ -52,28 +79,33 @@ const HOLD: f64 = 0.25;
 /// A second tap that starts within this long of the first one ending makes a double tap.
 const DOUBLE: f64 = 0.4;
 
+#[derive(Default)]
 pub struct Taps {
     state: State,
     last_tap: Option<(Which, f64)>,
-}
-
-impl Default for Taps {
-    fn default() -> Self {
-        Taps { state: State::Up, last_tap: None }
-    }
+    bindings: Bindings,
 }
 
 impl Taps {
+    pub fn new(bindings: Bindings) -> Self {
+        Self { bindings, ..Self::default() }
+    }
+
     pub fn key(&mut self, key: Key, now: f64) -> Action {
         match (key, self.state) {
             (Key::Press { which, alone }, State::Up) => {
-                let double = self.last_tap.take().is_some_and(|(w, at)| w == which && now - at <= DOUBLE);
-                self.state = if alone && !double { State::Down { which, since: now } } else { State::Spoiled };
-                if alone && double { Action::Write } else { Action::None }
+                let second = self.last_tap.take().is_some_and(|(w, at)| w == which && now - at <= DOUBLE);
+                self.state = if alone && self.bindings.uses(which) { State::Down { which, since: now, second } } else { State::Spoiled };
+                Action::None
             }
-            (Key::Release(w), State::Down { which, .. }) if w == which => {
-                self.last_tap = Some((which, now));
+            (Key::Release(w), State::Down { which, since, second }) if w == which => {
                 self.state = State::Up;
+                if self.bindings.write == Some(which) && now - since < HOLD {
+                    if second {
+                        return Action::Write;
+                    }
+                    self.last_tap = Some((which, now));
+                }
                 Action::None
             }
             (Key::Release(w), State::Talking(which)) if w == which => {
@@ -98,15 +130,17 @@ impl Taps {
 
     /// Each loop beat: a key held past HOLD starts a take, when one can start now.
     pub fn tick(&mut self, now: f64, available: bool) -> Action {
-        let State::Down { which, since } = self.state else { return Action::None };
+        let State::Down { which, since, .. } = self.state else { return Action::None };
         if now - since < HOLD {
             return Action::None;
         }
-        self.state = if available { State::Talking(which) } else { State::Spoiled };
-        if available { Action::Talk } else { Action::None }
+        let talk = available && self.bindings.hold == Some(which);
+        self.state = if talk { State::Talking(which) } else { State::Spoiled };
+        if talk { Action::Talk } else { Action::None }
     }
 }
 
+const VK_LCONTROL: u32 = 0xA2;
 const VK_RCONTROL: u32 = 0xA3;
 const VK_F23: u32 = 0x86;
 const VK_LWIN: u32 = 0x5B;
@@ -118,6 +152,8 @@ const VK_MASK: u16 = 0xE8;
 struct Hook {
     tx: Option<Sender<Key>>,
     held: Option<Which>,
+    bindings: Bindings,
+    copilot_down: bool,
 }
 
 thread_local! {
@@ -137,22 +173,31 @@ fn send_mask_key() {
 /// True to swallow the key (the Copilot key's F23).
 fn on_key(hook: &mut Hook, vk: u32, down: bool) -> bool {
     let Some(tx) = hook.tx.as_ref() else { return false };
+    let copilot_mods = crate::keys::COMMAND | crate::keys::SHIFT;
     let which = match vk {
+        VK_LCONTROL => Some(Which::LeftCtrl),
         VK_RCONTROL => Some(Which::RightCtrl),
+        VK_LSHIFT => Some(Which::LeftShift),
         // F23 alone is a real (rare) key: only Win+F23 is the Copilot key.
-        VK_F23 if hook.held == Some(Which::Copilot) || crate::keys::held().mods & crate::keys::COMMAND != 0 => Some(Which::Copilot),
+        VK_F23 if hook.bindings.uses(Which::Copilot)
+            && (hook.copilot_down || crate::keys::held().mods & copilot_mods == copilot_mods) => Some(Which::Copilot),
         _ => None,
-    };
+    }.filter(|&w| hook.bindings.uses(w));
+    let swallow = which == Some(Which::Copilot) && (down || hook.copilot_down);
+    if vk == VK_F23 { hook.copilot_down = swallow && down; }
+    if swallow && down && hook.held == Some(Which::LeftShift) {
+        hook.held = None;
+        let _ = tx.send(Key::Other);
+        let _ = tx.send(Key::Release(Which::LeftShift));
+    }
     match (which, down, hook.held) {
         // Auto-repeat of the held key.
         (Some(w), true, Some(h)) if w == h => {}
         (Some(w), true, None) => {
+            // The state of the key being pressed isn't updated yet when the hook runs.
             let f = crate::keys::held();
-            let alone = match w {
-                // The state of the key being pressed isn't updated yet when the hook runs.
-                Which::RightCtrl => f.mods & !crate::keys::CONTROL == 0,
-                Which::Copilot => f.mods & !(crate::keys::COMMAND | crate::keys::SHIFT) == 0,
-            } && !f.altgr && !crate::keys::other_key_down();
+            let alone = f.mods == if w == Which::Copilot { copilot_mods } else { 0 }
+                && !f.altgr && !crate::keys::other_key_down();
             if w == Which::Copilot {
                 send_mask_key();
             }
@@ -169,13 +214,13 @@ fn on_key(hook: &mut Hook, vk: u32, down: bool) -> bool {
             let _ = tx.send(Key::Release(Which::Copilot));
         }
         // The Copilot key's own Win and Shift aren't other keys.
-        (None, true, Some(Which::Copilot)) if vk == VK_LWIN || vk == VK_LSHIFT => {}
+        (_, true, Some(Which::Copilot)) if vk == VK_LWIN || vk == VK_LSHIFT => {}
         (_, true, Some(_)) => {
             let _ = tx.send(Key::Other);
         }
         _ => {}
     }
-    which == Some(Which::Copilot)
+    swallow
 }
 
 unsafe extern "system" fn keyboard_hook(code: i32, msg: WPARAM, param: LPARAM) -> LRESULT {
@@ -200,18 +245,21 @@ pub struct Keyboard {
 }
 
 impl Keyboard {
-    pub fn watch() -> Option<Self> {
+    pub fn watch(bindings: Bindings) -> Option<Self> {
+        if bindings == Bindings::default() {
+            return None;
+        }
         let (ready, started) = mpsc::sync_channel(0);
         let (tx, rx) = mpsc::channel();
         let thread = thread::spawn(move || {
-            HOOK.with_borrow_mut(|hook| hook.tx = Some(tx));
+            HOOK.with_borrow_mut(|hook| { hook.tx = Some(tx); hook.bindings = bindings; });
             // SAFETY: the callback is static and the message loop stays on this thread until the hook is removed.
             unsafe {
                 let mut msg = MSG::default();
                 PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
                 let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), GetModuleHandleW(std::ptr::null()), 0);
                 if hook.is_null() {
-                    crate::log("couldn't watch Right Ctrl and the Copilot key");
+                    crate::log("couldn't watch the configured single-key shortcuts");
                     return;
                 }
                 if ready.send(GetCurrentThreadId()).is_ok() {
@@ -249,9 +297,13 @@ mod tests {
         t.key(Key::Press { which, alone: true }, now)
     }
 
+    fn ctrl() -> Taps {
+        Taps::new(Bindings { hold: Some(CTRL), write: Some(CTRL) })
+    }
+
     #[test]
     fn holding_talks_and_letting_go_sends() {
-        let mut t = Taps::default();
+        let mut t = Taps::new(Bindings { hold: Some(Which::Copilot), write: None });
         assert_eq!(press(&mut t, Which::Copilot, 0.0), Action::None);
         assert_eq!(t.tick(0.2, true), Action::None);
         assert_eq!(t.tick(0.25, true), Action::Talk);
@@ -261,13 +313,13 @@ mod tests {
 
     #[test]
     fn two_quick_taps_open_the_typing_field_once() {
-        let mut t = Taps::default();
+        let mut t = ctrl();
         press(&mut t, CTRL, 0.0);
         assert_eq!(t.key(Key::Release(CTRL), 0.1), Action::None);
         assert_eq!(t.tick(0.2, true), Action::None);
-        assert_eq!(press(&mut t, CTRL, 0.3), Action::Write);
-        assert_eq!(t.tick(0.8, true), Action::None, "the second tap held on doesn't start a take");
-        assert_eq!(t.key(Key::Release(CTRL), 0.9), Action::None);
+        assert_eq!(press(&mut t, CTRL, 0.3), Action::None);
+        assert_eq!(t.key(Key::Release(CTRL), 0.4), Action::Write);
+        assert_eq!(t.tick(0.8, true), Action::None);
         press(&mut t, CTRL, 1.0);
         t.key(Key::Release(CTRL), 1.1);
         assert_eq!(t.tick(1.2, true), Action::None);
@@ -275,7 +327,7 @@ mod tests {
 
     #[test]
     fn slow_taps_and_different_keys_are_not_a_double_tap() {
-        let mut t = Taps::default();
+        let mut t = ctrl();
         press(&mut t, CTRL, 0.0);
         t.key(Key::Release(CTRL), 0.1);
         assert_eq!(press(&mut t, CTRL, 0.6), Action::None);
@@ -285,29 +337,61 @@ mod tests {
 
     #[test]
     fn a_shortcut_is_not_a_talk() {
-        let mut t = Taps::default();
+        let mut t = ctrl();
         press(&mut t, CTRL, 0.0);
         assert_eq!(t.key(Key::Other, 0.1), Action::None); // Ctrl+C
         assert_eq!(t.tick(0.5, true), Action::None);
         assert_eq!(t.key(Key::Release(CTRL), 0.6), Action::None);
         assert_eq!(press(&mut t, CTRL, 0.7), Action::None, "a shortcut's Ctrl isn't the first tap");
         // Held a while before the key: the take had started and is dropped.
-        let mut t = Taps::default();
+        let mut t = ctrl();
         press(&mut t, CTRL, 0.0);
         assert_eq!(t.tick(0.3, true), Action::Talk);
         assert_eq!(t.key(Key::Other, 0.5), Action::Cancel);
         assert_eq!(t.key(Key::Release(CTRL), 0.6), Action::None);
         // Pressed with another modifier already down.
-        let mut t = Taps::default();
+        let mut t = ctrl();
         assert_eq!(t.key(Key::Press { which: CTRL, alone: false }, 0.0), Action::None);
         assert_eq!(t.tick(0.5, true), Action::None);
     }
 
     #[test]
     fn no_take_while_busy() {
-        let mut t = Taps::default();
+        let mut t = ctrl();
         press(&mut t, CTRL, 0.0);
         assert_eq!(t.tick(0.3, false), Action::None);
         assert_eq!(t.key(Key::Release(CTRL), 1.0), Action::None);
+    }
+
+    #[test]
+    fn hold_and_type_can_use_different_keys() {
+        let shift = Which::LeftShift;
+        let mut t = Taps::new(Bindings { hold: Some(CTRL), write: Some(shift) });
+        press(&mut t, CTRL, 0.0);
+        assert_eq!(t.key(Key::Release(CTRL), 0.1), Action::None);
+        press(&mut t, CTRL, 0.2);
+        assert_eq!(t.key(Key::Release(CTRL), 0.3), Action::None);
+        press(&mut t, shift, 1.0);
+        assert_eq!(t.tick(1.3, true), Action::None);
+        assert_eq!(t.key(Key::Release(shift), 1.4), Action::None);
+        press(&mut t, shift, 2.0);
+        t.key(Key::Release(shift), 2.1);
+        press(&mut t, shift, 2.2);
+        assert_eq!(t.key(Key::Release(shift), 2.3), Action::Write);
+    }
+
+    #[test]
+    fn a_shortcut_or_hold_on_the_second_press_is_not_a_double_tap() {
+        let mut t = ctrl();
+        press(&mut t, CTRL, 0.0);
+        t.key(Key::Release(CTRL), 0.1);
+        press(&mut t, CTRL, 0.2);
+        t.key(Key::Other, 0.25);
+        assert_eq!(t.key(Key::Release(CTRL), 0.3), Action::None);
+        press(&mut t, CTRL, 1.0);
+        t.key(Key::Release(CTRL), 1.1);
+        press(&mut t, CTRL, 1.2);
+        assert_eq!(t.tick(1.5, true), Action::Talk);
+        assert_eq!(t.key(Key::Release(CTRL), 1.8), Action::Send);
     }
 }

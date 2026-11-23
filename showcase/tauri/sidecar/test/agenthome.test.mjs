@@ -30,17 +30,17 @@ for (const k of KINDS) {
   seen.add(svg);
 }
 
-// The home: the top-right corner, 12 px in from the safe area (menu bar, Dock, notch), whatever the screen.
+// The home: the bottom-right corner, 12 px in from the safe area (menu bar, Dock, notch), whatever the screen.
 const place = (size, safe, view) => Array.from(window.Roamie.agentHomePlace(size, safe, view));
 const none = { top: 0, right: 0, bottom: 0, left: 0 };
-assert.deepEqual(place([300, 200], none, [1440, 900]), [1440 - 12 - 300, 12]);
-assert.deepEqual(place([300, 200], { top: 33, right: 0, bottom: 80, left: 0 }, [1440, 900]), [1128, 45], 'below the menu bar');
-assert.deepEqual(place([300, 200], { top: 0, right: 64, bottom: 0, left: 0 }, [1280, 800]), [1280 - 64 - 12 - 300, 12], 'clear of a Dock on the right');
-assert.deepEqual(place([300, 200], none, [280, 600]), [12, 12], 'a screen narrower than the home: its left edge stays in view');
-assert.deepEqual(place([300, 200], undefined, [1280, 800]), [968, 12], 'no safe area yet');
+assert.deepEqual(place([300, 200], none, [1440, 900]), [1440 - 12 - 300, 688]);
+assert.deepEqual(place([300, 200], { top: 33, right: 0, bottom: 80, left: 0 }, [1440, 900]), [1128, 608], 'above the bottom safe area');
+assert.deepEqual(place([300, 200], { top: 0, right: 64, bottom: 0, left: 0 }, [1280, 800]), [1280 - 64 - 12 - 300, 588], 'clear of a Dock on the right');
+assert.deepEqual(place([300, 200], none, [280, 600]), [12, 388], 'a screen narrower than the home: its left edge stays in view');
+assert.deepEqual(place([300, 200], undefined, [1280, 800]), [968, 588], 'no safe area yet');
 for (const [w, h] of [[1440, 900], [1280, 800], [1920, 1080], [3008, 1692]]) {
   const [x, y] = place([300, 400], { top: 25, right: 0, bottom: 70, left: 0 }, [w, h]);
-  assert.ok(x + 300 <= w - 12 && y >= 25 + 12 && Number.isInteger(x) && Number.isInteger(y), `${w}x${h}`);
+  assert.ok(x + 300 <= w - 12 && y + 400 === h - 70 - 12 && Number.isInteger(x) && Number.isInteger(y), `${w}x${h}`);
 }
 // desktop.html pins every <canvas> (position: fixed); the minis must opt back into their row's layout.
 const homeSrc = fs.readFileSync(new URL('../../../roamies/agent-home.js', import.meta.url), 'utf8');
@@ -48,7 +48,7 @@ assert.ok(/canvas\s*\{[^}]*position:\s*fixed/.test(fs.readFileSync(new URL('../.
 assert.ok(/\.ah-mini, \.ahs-mini \{[^}]*position: static/.test(homeSrc), 'minis stay in flow');
 // The made panel's open button: where it worked when it said so, else its files, else none.
 const label = window.Roamie.agentOpenLabel;
-assert.equal(label({ outcome: 'Made it.', widget: true, files: [] }), 'Open widget');
+assert.equal(label({ outcome: 'Made it.', widget: true, files: [] }), null);
 assert.equal(label({ outcome: 'x', files: [{ name: 'a.md' }], place: null }), 'Open folder');
 assert.equal(label({ outcome: 'x', files: [], place: { kind: 'folder', name: 'Downloads' } }), 'Open folder');
 assert.equal(label({ outcome: 'x', files: [], place: { kind: 'file', name: 'a.pdf' } }), 'Open file');

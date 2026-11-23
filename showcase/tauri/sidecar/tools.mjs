@@ -498,8 +498,9 @@ export function createTools({ vault = null, allowActions, ui, ask, openUrl, onCo
   // Cards the user pinned (ink.js): the overlay keeps them through clears and window changes, so they're remembered here too.
   const pinned = new Set();
   const keepPinned = (id) => pinned.has(id);
-  const forgetInk = () => { parts.clear(keepPinned); lists.clear(keepPinned); for (const m of [buttons, quizzes]) for (const id of [...m.keys()]) if (!pinned.has(id)) m.delete(id); for (const id of [...loose]) if (!pinned.has(id)) loose.delete(id); };
-  const windowBound = () => parts.ids.some((p) => !loose.has(p));
+  const forgetInk = (keep = keepPinned) => { parts.clear(keep); lists.clear(keep); for (const m of [buttons, quizzes, loose]) for (const id of m.keys()) if (!keep(id)) m.delete(id); };
+  const isWidget = (id) => parts.get(id)?.kind === 'widget';
+  const windowBound = () => parts.ids.some((p) => !loose.has(p) && !isWidget(p));
   const ink = { waits: new Map(), turn: -1, active: 0, front: '', win: null, page: '', watch: null, checks: [], fresh: new Set() };
   const inkWait = (key, ms, signal) => new Promise((resolve) => {
     const done = (v) => { clearTimeout(t); signal?.removeEventListener('abort', stop); ink.waits.delete(key); resolve(v); };
@@ -538,7 +539,7 @@ export function createTools({ vault = null, allowActions, ui, ask, openUrl, onCo
   };
   // The screen under the drawing changed: all of it fades (cards too), and the model is told nothing is there.
   function screenChanged(why) {
-    forgetInk(); ink.front = ''; ink.win = null; ink.page = ''; watchClicks(false);
+    forgetInk((id) => keepPinned(id) || isWidget(id)); ink.front = ''; ink.win = null; ink.page = ''; watchClicks(false);
     for (const t of ink.checks) clearTimeout(t);
     ink.checks = [];
     ui({ kind: 'agent', e: { type: 'ink_stale' } });
@@ -700,10 +701,14 @@ export function createTools({ vault = null, allowActions, ui, ask, openUrl, onCo
       }
     }
   }
+  let widgetTurn = -1;
   // opts.fade: seconds after it finishes that the drawing goes by itself (the welcome tour).
   async function draw(args, ctx, opts = {}) {
     const problems = checkDraw(args);
     if (problems.length) throw new Error(problems.join('\n'));
+    const thisTurn = turn;
+    const widget = args.beats?.some((b) => b.marks.some((m) => m.kind === 'widget'));
+    if (widget && widgetTurn === thisTurn) return 'The interactive card is already open for this request. Stop here.';
     // Labels on a picture the model hasn't seen would be guesses: it looks first (see_photo), then draws.
     const unseen = photos.unseen(args.beats);
     if (unseen) throw new Error(unseen);
@@ -750,6 +755,10 @@ export function createTools({ vault = null, allowActions, ui, ask, openUrl, onCo
         }
         // Cancelled while this step's places were looked up: it never shows.
         if (ctx?.signal?.aborted) return stopped();
+        if (seg.some((b) => b.marks.some((m) => m.kind === 'widget'))) {
+          if (widgetTurn === thisTurn) return 'The interactive card is already open for this request. Stop here.';
+          widgetTurn = thisTurn;
+        }
         const ids = parts.assign(seg);
         for (const p of ids) ink.fresh.add(p);
         drawn.push(...ids.map((p) => [p, parts.get(p)]));
@@ -1048,6 +1057,7 @@ map (region: world, a continent, or countries with commas; shade [{name, tone}],
 math (steps [{tex, note}]): working, one LaTeX line a step (\\frac{a}{b}, \\sqrt{x}, x^{2}, x_{1}, \\left( \\right), \\text{words}, Greek, \\times \\cdot \\pm \\le \\ne \\approx \\pi \\infty; no \\begin, & or \\\\ line breaks); note: what changed. geometry (vertices [{id, x, y}] y up, lines [{from, to, label, dash}], angles [{at, from, to, label}], circles [{at, r, label}]): a figure.
 molecule (smiles, label): a compound. model (title, parts [{shape: box|sphere|cylinder|cone|torus, at, size, rot [x,y,z] within -1 to 1, tone, label, motion}]): a physical thing or machine (a flow beside it only if it runs in stages); motion {do: spin|orbit|slide|pulse, axis, around, to, secs} shows it working: slide goes at → to and back, orbit circles "around", spin turns in place (a ball looks still), pulse swells.
 quiz (questions [{text, options: 2 to 4, answer: the right option word for word, explain}], up to ${LIMITS.questions}): "test me"; their score comes to you with their next message, so say a line and stop: never ask the questions in words too, or ask them for their answers or score.
+widget ({title, panels}): an interactive tool that opens in the bottom-right overlay. Use one widget mark and put any related tools in that same card as tabs (up to 3). Panels: {type:"tic_tac_toe", title} for a local two-player game, or {type:"calculator", title, fields:[{id,label,value?,suffix?}], results:[{label,formula,format?,currency?}]} for live calculations. Formula is a postfix array of strings: numbers, field IDs and +, -, *, /, min, max. Example: ["revenue","expenses","-","rate","*","100","/"] for a whole-number percentage rate. format: number, percent (0.25 renders as 25%), or currency with an explicit currency code such as USD. Leave unknown input values blank. Use existing list, graph, model, quiz and other cards for the interactions they support. Stop after opening the card.
 deep: true for "explain X in depth", "teach me how…", "walk me through…": one big card at a time, each replacing the last; 4 to 10 beats of a card each: the big picture, a stage per card, a short summary.
 Actions: type (text into the field at; needs actions allowed), copy (text), open (url), handoff (task), button (text, action {do: ask|open|copy, value}: a likely next step), emote (name: hype|wave|upset|remind|motivate), sfx (name). tone: accent, teal, amber, coral, lilac, sky, lime, red, white.
 A drawing stays until it's cleared, the window changes or the next one replaces it; keep: true keeps the cards up (screen marks still go) when adding to them or asked to. At most ${LIMITS.cardsShown} cards show at once (one more closes the oldest), so use the fewest. Each piece gets an id (p1, p2…); to change one: edit [{do: recolor|move|erase|clear, part, tone, dx, dy}] with no beats.${POINTER_OK ? '' : " On this desktop (Wayland) clicks and hovers in other apps can't be seen: never use wait; beats play one after another, so word each step to read well without pausing."}`,

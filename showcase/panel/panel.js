@@ -905,6 +905,11 @@
   }
   // The keys that work from anywhere. On Wayland no app may hold its own, so it lists the commands to bind instead.
   const SHORTCUT_LABELS = { summon: 'Show or hide me', snap: 'Ask about an area', list: 'Your list' };
+  const singleShortcut = (label, id, value, choices) => el('div', { className: 'setting' },
+    el('span', { id: `lbl-${id}` }, label),
+    el('span', { className: 'px field select' },
+      el('select', { 'data-k': id, 'aria-labelledby': `lbl-${id}`, on: { change: (e) => act(`${id}:${e.target.value}`) } },
+        choices.map(([key, name]) => el('option', { value: key, textContent: name, selected: key === value })))));
   function shortcutsPage() {
     const b = state.bind, sc = state.shortcuts, w = state.writeKeys;
     if (b) {
@@ -915,6 +920,9 @@
     }
     if (!sc) return [group('Shortcuts', 'This computer doesn’t allow shortcuts that work from anywhere.', null)];
     return [
+      sc.single ? group('Single-key gestures', 'These shortcuts work when Voice control is on and the speech model is ready.', null,
+        singleShortcut('Hold to talk', 'singleHold', sc.single.hold, sc.single.choices),
+        singleShortcut('Double-tap to type', 'singleWrite', sc.single.write, sc.single.choices)) : null,
       sc.talk ? group('Talk', 'Hold two keys to talk. Tap them to talk hands-free.', null,
         picks('Talk keys', sc.talk.pairs, sc.talk.value, (x) => act(`talk:${x}`), 'talk',
           Object.fromEntries(sc.talk.pairs.map(([id, keys]) => [id, `Hold ${keys} to talk. If they’re your typing keys, the two swap.`])))) : null,
@@ -950,8 +958,8 @@
         state.quiet ? el('div', { className: 'setting' },
           el('span', { id: 'lbl-quieton' }, 'Quiet hours',
             el('small', { className: 'wrap', textContent: 'Alerts still appear, but nothing is spoken and focus nudges wait.' })),
-          el('span', { className: 'row-btns' },
-            el('button', { className: 'px switch', type: 'button', role: 'switch', 'aria-checked': String(!!state.quiet.on), 'aria-labelledby': 'lbl-quieton', 'data-k': 'quieton', on: { click: () => act('quieton') } }),
+          el('button', { className: 'px switch', type: 'button', role: 'switch', 'aria-checked': String(!!state.quiet.on), 'aria-labelledby': 'lbl-quieton', 'data-k': 'quieton', on: { click: () => act('quieton') } }),
+          el('span', { className: 'row-btns quiet-times' },
             el('input', { type: 'time', value: state.quiet.start, 'aria-label': 'Quiet hours start', 'data-k': 'quietstart', on: { change: (e) => act(`quietstart:${e.target.value}`) } }),
             el('span', { textContent: 'to' }),
             el('input', { type: 'time', value: state.quiet.end, 'aria-label': 'Quiet hours end', 'data-k': 'quietend', on: { change: (e) => act(`quietend:${e.target.value}`) } }))) : null),

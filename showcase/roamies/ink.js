@@ -1890,6 +1890,7 @@
   const partMarks = (id) => marks.filter((m) => m.alive && m.part === id);
   const partBox = (ms) => ms.reduce((u, m) => union(u, markBox(m)), null);
   async function edit(e) {
+    if (e.do === 'clear' || (e.do === 'erase' && e.part === R.widgets?.part)) R.widgets?.close();
     if (e.do === 'clear') { sfx('dematerialize'); const live = marks.filter((m) => m.alive && (m.part || m.card) && !m.local); await tween(0.35, (u) => live.forEach((m) => (m.alpha = 1 - u))); live.forEach((m) => (m.alive = false)); return; }
     const ms = partMarks(e.part);
     if (!ms.length) return;
@@ -1942,6 +1943,7 @@
   }
   function clearEverything() {
     stop();
+    R.widgets?.close();
     for (const id of new Set(marks.filter((m) => m.alive && m.part && !m.local && !m.pinned).map((m) => m.part))) R.ink.send?.({ type: 'ink_closed', part: id });
     R.ink.send?.({ type: 'ink_cleared' });
     sfx('dematerialize');
@@ -1984,6 +1986,7 @@
   const PEN_FREE = new Set(['sfx', 'copy', 'open', 'handoff']);
   const onScreen = (r) => !!r && r[0] + r[2] > 0 && r[1] + r[3] > 0 && r[0] < W && r[1] < H;
   async function runMark(m, ctx) {
+    if (m.kind === 'widget') return R.widgets?.show(m);
     const f = SCREEN_MARKS[m.kind] ?? ACTIONS_DRAW[m.kind] ?? CARDS_DRAW[m.kind];
     if (!f) return null;
     await fontsReady();
@@ -2333,6 +2336,7 @@
   };
   const ours = (e) => !!hitAt(e.clientX, e.clientY) || !!drag || !!sizing;
   addEventListener('pointerdown', (e) => {
+    if (e.target.closest?.('.ink-widget')) return;
     const h = hitAt(e.clientX, e.clientY);
     if (!h) return;
     e.stopPropagation(); e.preventDefault();
@@ -2367,6 +2371,7 @@
   }, true);
   addEventListener('pointerup', (e) => { if (drag || sizing) { drag = null; sizing = null; e.stopPropagation(); touch(0.2); } }, true);
   addEventListener('wheel', (e) => {
+    if (e.target.closest?.('.ink-widget')) return;
     if (!ours(e)) return;
     e.stopPropagation();
     // Over a card too tall for the screen: scroll its insides.
@@ -2375,10 +2380,12 @@
   }, { capture: true, passive: false });
 
   // ---------------------------------------------------------------- the host's way in (host.js)
-  R.inkHit = (x, y) => !!drag || !!sizing || !!hitAt(x, y);
+  R.inkHit = (x, y) => !!drag || !!sizing || !!R.widgets?.hit(x, y) || !!hitAt(x, y);
   // Every clickable area as [x, y, w, h]: Linux hosts make these part of the window's click shape (host.js).
   R.inkRects = () => {
     const out = [];
+    const widget = R.widgets?.rect();
+    if (widget) out.push(widget);
     for (const m of marks) {
       if (!m.alive || !m.hits || m.alpha < 0.5) continue;
       for (const h of m.hits()) out.push(xf(m, h.rect));
@@ -2393,6 +2400,7 @@
     // { all: true } (Esc) takes too. parts: these go as well (a cancelled request's cards). stop: also ends what's playing.
     clear(e = {}) {
       if (e.stop || !e.screen) stop();
+      if (!e.screen || e.parts?.includes(R.widgets?.part)) R.widgets?.close();
       const gone = marks.filter((m) => m.alive && !m.pinned && (e.parts?.includes(m.part) || (e.screen ? m.screen : e.all || !m.local)));
       fadeOut(gone);
     },
@@ -2406,7 +2414,7 @@
     reminders,
     get reminding() { return remOpen(); },
     // Pinned cards stay put on purpose: they don't count, so Esc still sends the Roamie away with one up.
-    get busy() { return G.playing || marks.some((m) => m.alive && !m.pinned); },
+    get busy() { return G.playing || !!R.widgets?.part || marks.some((m) => m.alive && !m.pinned); },
     get playing() { return G.playing; },
     // Marks still on the real screen (frames, loops, arrows, labels): unlike cards they have no close button.
     get loose() { return marks.some((m) => m.alive && m.screen && !m.leaving); },

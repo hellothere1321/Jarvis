@@ -13,7 +13,8 @@ export const TONES = ['accent', 'teal', 'amber', 'coral', 'lilac', 'sky', 'lime'
 export const SCREEN = ['point', 'target', 'hover', 'ring', 'frame', 'underline', 'strike', 'check', 'cross', 'connect', 'trace', 'num', 'label', 'write', 'scroll', 'spotlight', 'highlight', 'line', 'curve', 'arrow', 'circle', 'rect'];
 export const ACTIONS = ['emote', 'sfx', 'type', 'copy', 'open', 'handoff', 'button'];
 export const CARDS = ['card', 'note', 'list', 'mindmap', 'clip', 'sources', 'photo', 'graph', 'legend', 'timeline', 'molecule', 'model', 'flow', 'table', 'bars', 'map', 'math', 'geometry', 'quiz', 'ticket', 'medal'];
-export const KINDS = [...SCREEN, ...ACTIONS, ...CARDS];
+export const WIDGET_OPERATORS = ['+', '-', '*', '/', 'min', 'max'];
+export const KINDS = [...SCREEN, ...ACTIONS, ...CARDS, 'widget'];
 // Drawn from a list of points (screenshot pixels) instead of one place.
 const PATHS = new Set(['trace', 'line', 'curve', 'arrow']);
 const EMOTES = ['hype', 'wave', 'upset', 'remind', 'motivate'];
@@ -25,6 +26,18 @@ const NODE_SHAPES = ['box', 'round', 'diamond'];
 const num = z.number();
 const pair = z.array(num).length(2);
 const triple = z.array(num).length(3);
+const widgetPanel = z.object({
+  type: z.enum(['calculator', 'tic_tac_toe']), title: z.string().min(1).max(36),
+  fields: z.array(z.object({
+    id: z.string().regex(/^[a-z][a-z0-9_]{0,19}$/), label: z.string().min(1).max(40),
+    value: num.optional(), suffix: z.string().max(8).optional(),
+  })).min(1).max(6).optional(),
+  results: z.array(z.object({
+    label: z.string().min(1).max(40),
+    formula: z.array(z.preprocess((v) => typeof v === 'number' ? String(v) : v, z.string().trim().min(1).max(26))).min(1).max(32),
+    format: z.enum(['number', 'percent', 'currency']).optional(), currency: z.string().regex(/^[A-Z]{3}$/).optional(),
+  })).min(1).max(4).optional(),
+});
 const Target = z.object({
   text: z.string().min(1).max(80).optional(), every: z.boolean().optional(), within: z.object({ x: num, y: num, w: num, h: num }).optional(),
   id: z.number().int().optional(),
@@ -73,6 +86,7 @@ const Mark = z.object({
   circles: z.array(z.object({ at: z.string().min(1).max(8), r: num, label: z.string().max(20).optional(), tone: z.enum(TONES).optional() })).max(4).optional(),
   questions: z.array(z.object({ text: z.string().min(1).max(160), options: z.array(z.string().min(1).max(80)).min(2).max(4), answer: z.string().min(1).max(80), explain: z.string().max(200).optional() })).max(LIMITS.questions).optional(),
   action: z.object({ do: z.enum(['ask', 'open', 'copy']), value: z.string().min(1).max(600) }).optional(),
+  panels: z.array(widgetPanel).min(1).max(3).optional(),
   task: z.string().max(120).optional(),
 });
 // Some models (Gemini Flash-Lite, #81) put a lone mark's fields on its beat or on the call itself instead of in marks,
@@ -95,7 +109,7 @@ const vec3 = (v, k) => {
 const vecs = (o, keys) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, keys.includes(k) ? vec3(v, k) : v]));
 // Lists and places sent as JSON text ("[{…}]"), as DeepSeek does, are read as what they say.
 const SHAPED = new Set(['at', 'to', 'tie', 'points', 'items', 'branches', 'sources', 'x_range', 'y_range', 'plots', 'dots', 'keys', 'events', 'parts',
-  'nodes', 'links', 'columns', 'rows', 'bars', 'labels', 'shade', 'pins', 'routes', 'steps', 'vertices', 'lines', 'angles', 'circles', 'questions', 'action', 'marks', 'beats', 'edit']);
+  'nodes', 'links', 'columns', 'rows', 'bars', 'labels', 'shade', 'pins', 'routes', 'steps', 'vertices', 'lines', 'angles', 'circles', 'questions', 'action', 'panels', 'marks', 'beats', 'edit']);
 export const unjson = (v) => { if (typeof v !== 'string' || !/^\s*[[{]/.test(v)) return v; try { return JSON.parse(v); } catch { return v; } };
 const parsed = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, SHAPED.has(k) ? unjson(v) : v]));
 function fixShapes(m) {
@@ -179,6 +193,7 @@ const hasAt = (t) => !!t && (t.text != null || t.id != null || (t.x != null && t
 export function checkDraw(args) {
   const out = [], beats = args.beats ?? [], edits = args.edit ?? [];
   if (!beats.length && !edits.length) out.push('Give beats to draw, or edit to change what is drawn.');
+  if (beats.flatMap((b) => b.marks).filter((m) => m.kind === 'widget').length > 1) out.push('Use one widget mark with each requested tool in its panels array.');
   beats.forEach((b, i) => {
     if (!b.say.trim() && !b.marks.length) out.push(`beat ${i + 1}: needs say or marks.`);
     b.marks.forEach((m, j) => {
@@ -229,6 +244,31 @@ function idProblems(list, what) {
   return out;
 }
 const CHECKS = {
+  widget(m) {
+    const errors = [];
+    if (!m.title || !m.panels?.length) return ['needs title and panels'];
+    for (const panel of m.panels) {
+      if (panel.type !== 'calculator') continue;
+      if (!panel.fields?.length || !panel.results?.length) {
+        errors.push(`${panel.title}: needs fields and results`);
+        continue;
+      }
+      const fields = new Set(panel.fields.map((f) => f.id));
+      if (fields.size !== panel.fields.length) errors.push(`${panel.title}: field IDs must be unique`);
+      if (fields.has('min') || fields.has('max')) errors.push(`${panel.title}: min and max are formula operators; use other field IDs`);
+      for (const result of panel.results) {
+        let depth = 0;
+        for (const token of result.formula) {
+          if (fields.has(token) || Number.isFinite(Number(token))) depth++;
+          else if (WIDGET_OPERATORS.includes(token) && depth >= 2) depth--;
+          else { depth = 0; break; }
+        }
+        if (depth !== 1) errors.push(`${result.label}: use a postfix formula with field IDs, numbers, and ${WIDGET_OPERATORS.join(', ')}`);
+        if (result.format === 'currency' && !result.currency) errors.push(`${result.label}: currency format needs a three-letter currency code`);
+      }
+    }
+    return errors;
+  },
   model(m) {
     if (!m.parts?.length) return ['needs parts.'];
     const out = [];
