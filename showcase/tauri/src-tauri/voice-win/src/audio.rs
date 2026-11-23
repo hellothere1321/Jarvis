@@ -312,6 +312,17 @@ pub fn open_mic(mut sink: Sink) -> Result<Source, MicError> {
     Ok(Source { _stream: Some(stream), stop: Arc::new(AtomicBool::new(false)) })
 }
 
+/// RPC_E_CHANGED_MODE: after hours of use the helper's main thread can stop opening the mic with "Cannot change
+/// thread mode after it is set", while a new thread (a fresh COM apartment) still opens it.
+#[cfg(windows)]
+pub const CHANGED_MODE: &str = "(os error -2147417850)";
+
+/// The mic opened on a short-lived thread of its own (see CHANGED_MODE); the stream runs on cpal's thread as usual.
+#[cfg(windows)]
+pub fn open_mic_fresh(sink: Sink) -> Result<Source, MicError> {
+    std::thread::spawn(move || open_mic(sink)).join().unwrap_or_else(|_| Err(MicError::new("failed", "the mic thread stopped")))
+}
+
 #[cfg(not(any(windows, target_os = "linux")))]
 pub fn open_mic(_sink: Sink) -> Result<Source, MicError> {
     Err(MicError::new("failed", "the microphone is only wired up on Windows and Linux (use --test-audio)"))

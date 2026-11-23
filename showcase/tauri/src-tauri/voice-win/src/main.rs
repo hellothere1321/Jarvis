@@ -729,7 +729,14 @@ impl Voice {
         let sink = Sink::new(self.buf.clone(), self.tx.clone());
         let started = match &self.test_audio {
             Some(p) => audio::play_file(p, sink).map_err(|e| MicError::new("failed", e)),
-            None => audio::open_mic(sink),
+            None => audio::open_mic(sink).or_else(|e| {
+                #[cfg(windows)]
+                if e.detail.contains(audio::CHANGED_MODE) {
+                    log("audio: this thread can't open the mic any more; opening it on a new one");
+                    return audio::open_mic_fresh(Sink::new(self.buf.clone(), self.tx.clone()));
+                }
+                Err(e)
+            }),
         };
         self.source = Some(started?);
         Ok(())
