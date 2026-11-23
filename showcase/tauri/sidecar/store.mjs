@@ -396,7 +396,8 @@ export const startOfDay = (ms) => { const d = new Date(ms); d.setHours(0, 0, 0, 
  *  overdue, and things finished today; Later = due after today, or no time. Soonest first, undated last. */
 export function listItems(now = Date.now(), plannerToday = []) {
   const today = startOfDay(now), tomorrow = startOfDay(today + 36 * 36e5);
-  const shown = loadMemory().commitments.filter((c) => c.status === 'open' || (c.status === 'done' && (c.doneAt ?? 0) >= today));
+  // A timer is listed while it runs; once rung it's gone, not ticked off.
+  const shown = loadMemory().commitments.filter((c) => c.status === 'open' || (c.kind !== 'timer' && c.status === 'done' && (c.doneAt ?? 0) >= today));
   const item = (c) => ({ id: c.id, text: c.text, due: c.due, done: c.status === 'done', overdue: c.status === 'open' && !!c.due && c.due < now, kind: c.kind ?? 'commitment', repeat: c.repeat ?? null });
   const order = (a, b) => ((a.status === 'done') - (b.status === 'done')) || ((a.due ?? Infinity) - (b.due ?? Infinity)) || a.createdAt - b.createdAt;
   const isToday = (c) => (c.status === 'done' ? (c.due == null || c.due < tomorrow) : c.due != null && c.due < tomorrow);
@@ -416,13 +417,14 @@ export async function clearFinished(now = Date.now()) {
   return before - m.commitments.length;
 }
 
-/** kind 'reminder': a plain "remind me", done once it has fired. 'commitment' (and older entries without a kind):
+/** kind 'reminder': a plain "remind me", done once it has fired. 'timer': the same, counted down on the list and
+ *  rung by itself when it ends. 'commitment' (and older entries without a kind):
  *  something the user said they'd do, open until they finish or drop it. */
 /** repeat: a rule parseRepeat understands ('daily', 'weekdays', 'every 2 hours', 'mon,wed,fri' …); it needs a due
  *  time, the first one of the series. A repeating reminder moves on to its next time each time it fires; a repeating
  *  commitment moves on when it's marked done. Dropping either ends the series. */
 export async function addCommitment(text, dueMs, kind = 'commitment', repeat = null) {
-  const c = { id: newId('c'), text: String(text).trim().slice(0, 200), due: dueMs ?? null, createdAt: Date.now(), status: 'open', remindedAt: null, kind: kind === 'reminder' ? 'reminder' : 'commitment' };
+  const c = { id: newId('c'), text: String(text).trim().slice(0, 200), due: dueMs ?? null, createdAt: Date.now(), status: 'open', remindedAt: null, kind: kind === 'reminder' || kind === 'timer' ? kind : 'commitment' };
   const r = repeat ? parseRepeat(repeat) : null;
   if (r && c.due != null) {
     c.repeat = r.spec; c.repeatFrom = c.due;
@@ -556,7 +558,7 @@ export async function takeDueReminders(now = Date.now()) {
     c.remindedAt = now;
     // A repeating reminder moves on to its next time; times missed while the computer slept are skipped, not stacked.
     if (c.kind === 'reminder' && c.repeat && advance(c, now)) continue;
-    if (c.kind === 'reminder') { c.status = 'done'; c.doneAt = now; }
+    if (c.kind === 'reminder' || c.kind === 'timer') { c.status = 'done'; c.doneAt = now; }
   }
   await saveMemory();
   return fired.map((c, i) => ({ ...c, missed: missed.has(c.id), next: due[i].repeat && due[i].status === 'open' && due[i].due !== c.due ? due[i].due : null }));

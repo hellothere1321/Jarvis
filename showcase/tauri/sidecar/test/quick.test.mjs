@@ -92,6 +92,7 @@ for (const t of ['remind me about the thing', 'remind me to call mum', 'remind m
   'remind me to buy milk 2', 'remind me at 25 to leave', 'remind me at 5pm about the meeting', 'remind me tomorrow to call mum', 'remind me today at 3pm to call mum']) assert.equal(m(t), null, `not a clear reminder: ${t}`);
 
 // ---------- the list ----------
+for (const t of ['open my planner', 'open planner', 'show me the planner', 'planner', 'pull up my planner page']) expect(t, 'planner', 'Opening your planner.');
 for (const t of ['show my list', "what's on my list", 'what is on my to-do list', 'show me my reminders', 'open my list', 'what are my reminders']) expect(t, 'list', "Here's your list.");
 
 // ---------- opening things and searching ----------
@@ -215,7 +216,7 @@ const deps = (over = {}) => {
   const all = S.openCommitments();
   assert.equal(all.length, 3);
   const timer = all.find((c) => /timer/.test(c.text)), call = all.find((c) => c.text === 'call mum'), stretch = all.find((c) => c.text === 'stretch');
-  assert.equal(timer.kind, 'reminder'); assert.ok(Math.abs(timer.due - (t0 + 600_000)) < 5000, 'timer due in 10 minutes');
+  assert.equal(timer.kind, 'timer'); assert.equal(timer.text, '10 minute timer'); assert.ok(Math.abs(timer.due - (t0 + 600_000)) < 5000, 'timer due in 10 minutes');
   assert.equal(call.kind, 'reminder'); assert.ok(Math.abs(call.due - (t0 + 20 * 6e4)) < 5000, 'reminder due in 20 minutes');
   assert.equal(stretch.repeat, 'weekdays'); assert.ok(stretch.due > t0);
   assert.equal(d.reminded.length, 3, 'the app is told so it can schedule them');

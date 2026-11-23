@@ -944,7 +944,7 @@ function doneTodayText() {
 function commitmentsText() {
   const now = Date.now();
   const today = startOfDay(now);
-  return openCommitments().map((c) => `- ${c.id}: ${c.text}${c.kind === 'reminder' ? ' [reminder]' : ''}${c.due ? ` (due ${fmtWhen(c.due)}${c.due < now ? ', OVERDUE' : ''})` : ''}${c.repeat ? ` [repeats ${repeatLabel(c.repeat)}${(c.lastDoneAt ?? 0) >= today ? '; already done once today' : ''}]` : ''}`).join('\n');
+  return openCommitments().map((c) => `- ${c.id}: ${c.text}${c.kind === 'reminder' ? ' [reminder]' : c.kind === 'timer' ? ' [timer]' : ''}${c.due ? ` (due ${fmtWhen(c.due)}${c.due < now ? ', OVERDUE' : ''})` : ''}${c.repeat ? ` [repeats ${repeatLabel(c.repeat)}${(c.lastDoneAt ?? 0) >= today ? '; already done once today' : ''}]` : ''}`).join('\n');
 }
 
 // ---------- agent ----------
@@ -1878,7 +1878,7 @@ async function answerHere(text) {
   let line = '';
   const done = await quick(text, {
     say: (l) => { line = l; speakLine(l); },
-    showList: () => showList({ seconds: 20 }), onReminder: commitmentsChanged, onHabit: panel, open: quickOpen, stat: (p) => fs.stat(p),
+    showList: () => showList({ seconds: 20 }), onReminder: commitmentsChanged, onHabit: panel, openPlanner: () => openPanel('planner'), open: quickOpen, stat: (p) => fs.stat(p),
   });
   if (!done) return false;
   await resumed;
@@ -2260,6 +2260,7 @@ function showList({ seconds = 0, flash = null, toggle = false } = {}) {
   const fmt = (i) => {
     const when = i.kind === 'task' ? (i.overdue ? shortWhen(i.due, now) : 'Today') : i.kind === 'event'
       ? (i.allDay ? 'All day' : planner.timeLabel(i.due)) : (i.due ? shortWhen(i.due, now) : '');
+    if (i.kind === 'timer') return { id: i.id, kind: i.kind, text: i.text, done: i.done, overdue: false, when: '', ends: i.due };
     return { id: i.id, kind: i.kind, text: i.text, done: i.done, overdue: i.overdue, when: `${when}${i.repeat && when ? ' ↻' : ''}` };
   };
   ui({ kind: 'list', today: L.today.map(fmt), later: L.later.map(fmt), seconds, flash, toggle });
@@ -3265,7 +3266,14 @@ if (config.onboarded) warmUp();
 async function remindTick() {
   if (busy || queued || loggingIn || onboarding) { reminderRetry(); return; }
   const now = Date.now();
-  const due = await takeDueReminders(now);
+  const fired = await takeDueReminders(now);
+  // A timer rings by itself: said straight away, with no model turn and no snooze question.
+  const timers = fired.filter((c) => c.kind === 'timer'), due = fired.filter((c) => c.kind !== 'timer');
+  if (timers.length) {
+    menu(); showList({ seconds: 6 });
+    ui({ kind: 'agent', e: { type: 'emote', action: 'remind' } });
+    speakLine(`Time's up! Your ${timers.map((c) => c.text).join(' and ')} ${timers.length === 1 ? 'is' : 'are'} done.`);
+  }
   const events = await planner.takeDueAlerts(now).catch((e) => { console.error('planner alerts', e); return []; });
   if (!due.length && !events.length) return;
   const silent = quietNow();

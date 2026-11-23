@@ -2121,7 +2121,12 @@
   const REM_W = 340, REM_PART = 'reminders', HEADF = `800 16px ${DOTO}`;
   const REM = { data: { today: [], later: [] }, known: false, m: null, until: 0, timer: 0, shown: new Map(), ticked: new Map(), rings: new Map(), checks: new Map(), strikes: new Map(), flash: null, flashAt: 0 };
   const remOpen = () => !!REM.m && REM.m.alive && !REM.m.leaving;
-  const remWhen = (i) => (i.done ? 'done' : i.overdue ? `late ${i.when}` : i.when || '');
+  // A running timer: time left, m:ss (h:mm:ss over an hour), counted down while the card is up.
+  const timeLeft = (ms) => {
+    const s = Math.max(0, Math.ceil((ms - Date.now()) / 1000)), p = (n) => String(n).padStart(2, '0');
+    return s >= 3600 ? `${Math.floor(s / 3600)}:${p(Math.floor(s / 60) % 60)}:${p(s % 60)}` : `${Math.floor(s / 60)}:${p(s % 60)}`;
+  };
+  const remWhen = (i) => (i.done ? 'done' : i.ends ? timeLeft(i.ends) : i.overdue ? `late ${i.when}` : i.when || '');
   const cached = (map, key, make) => (map.has(key) ? map.get(key) : (map.set(key, make()), map.get(key)));
   const shift = (pts, x, y) => pts.map(([px, py]) => [px + x, py + y]);
   // Rows in card coordinates (from the card's top left), cut to the screen's height with "+N more".
@@ -2182,7 +2187,8 @@
         const ink = it.done ? MID : it.overdue ? TONES.coral : this.color;
         pen(b, l, this, r.ring, clamp(a / 0.3, 0, 1), ink, { key: 'r' + it.id, w: 2.4 });
         wrapped(b, r.lines, x + 40, ry + 18, 19, BODY, it.done ? DIM : TEXT, (a - 0.1) / 0.4);
-        if (r.when) typed(b, r.when, x + w - 16, ry + 18, SMALL, it.overdue && !it.done ? TONES.coral : DIM, (a - 0.2) / 0.3, { anchor: 'end' });
+        const when = it.ends && !it.done ? remWhen(it) : r.when;
+        if (when) typed(b, when, x + w - 16, ry + 18, SMALL, it.overdue && !it.done ? TONES.coral : DIM, (a - 0.2) / 0.3, { anchor: 'end' });
         if (it.done) {
           const tk = REM.ticked.get(it.id), u = tk != null ? t - tk : 9;
           pen(b, l, this, r.check, clamp(u / 0.2, 0, 1), HOT, { key: 'c' + it.id, w: 2.2 });
@@ -2227,6 +2233,7 @@
       if (!remOpen()) { clearInterval(REM.timer); return; }
       if (drag?.part === REM_PART || (G.ptr && inside(markBox(c), G.ptr[0], G.ptr[1]))) REM.until = Math.max(REM.until, now() + 2.5);
       if (now() > REM.until && !c.pinned) remClose(); // pinned: it stays until its ×
+      else if (c.rows?.some((r) => r.i?.ends)) touch(0.4); // a timer's countdown
     }, 250);
     await tween(0.35, (u) => { const e = ease(u); c.cw = REM_W * e; c.ch = c.h * e; });
     c.ready = true; c.opened = now();

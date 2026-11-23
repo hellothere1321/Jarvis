@@ -258,7 +258,9 @@ function timerMatch(s) {
   const secs = parseSpan(m[1].replace(/^(\d+(?:\.\d+)?|\w+)[ -](second|minute|hour)$/i, '$1 $2'));
   if (!secs) return null;
   const label = spanLabel(secs);
-  return { kind: 'timer', args: { secs, text: `Your timer for ${label} is up.` }, reply: `Timer set for ${label}.` };
+  // Listed as "10 minute timer": the unit singular before "timer".
+  const name = `${label.replace(/\b(\d+) (second|minute|hour)s\b/g, '$1 $2')} timer`;
+  return { kind: 'timer', args: { secs, text: name }, reply: `Timer set for ${label}.` };
 }
 
 const VAGUE = /^(?:it|that|this|something|stuff|things?|about\b.*|of\b.*|the (?:thing|stuff)\b.*|what i (?:said|told you)\b.*)$/i;
@@ -290,6 +292,8 @@ function reminderMatch(s, now) {
 }
 
 // ---------- the list ----------
+// The planner page of the panel. Its own match, so "open planner" isn't taken for an app called Planner.
+const PLANNER = /^(?:(?:open|show|pull up|bring up|display|view|see|go to|take me to)(?: me)? )?(?:my |the )?planner(?: page| tab)?$/i;
 const LIST = /^(?:(?:show|open|pull up|bring up|display|view|see|check)(?: me)? (?:my|the) (?:list|to-?do list|todo list|to-?dos|reminders)|what(?:'s| is| are) on my (?:list|to-?do list|todo list|reminders)|what are my (?:reminders|to-?dos)|show (?:the |my )?list)$/i;
 
 // ---------- habits ----------
@@ -359,6 +363,7 @@ export function match(text, { now = new Date(), home = os.homedir(), platform = 
   if (TIME.test(s)) return { kind: 'time', args: {}, reply: `It's ${clock(now)}.` };
   if (DAY.test(s)) return { kind: 'day', args: {}, reply: `It's ${DAYNAMES[now.getDay()][0].toUpperCase()}${DAYNAMES[now.getDay()].slice(1)}.` };
   if (DATE.test(s)) return { kind: 'date', args: {}, reply: `Today is ${now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}.` };
+  if (PLANNER.test(s)) return { kind: 'planner', args: {}, reply: 'Opening your planner.' };
   if (LIST.test(s)) return { kind: 'list', args: {}, reply: "Here's your list." };
   if (HABIT_LIST.test(s)) return { kind: 'habit-list', args: {}, reply: "Here are your habits." };
   let hm;
@@ -394,6 +399,7 @@ export async function run(m, deps) {
   switch (m.kind) {
     case 'time': case 'date': case 'day': case 'math': case 'convert': return say(m.reply);
     case 'list': deps.showList?.(); return say(m.reply);
+    case 'planner': if (!deps.openPlanner) return false; deps.openPlanner(); return say(m.reply);
     case 'habit-list': {
       deps.showHabits?.();
       const rows = habits.view(deps.now ?? Date.now());
@@ -416,7 +422,7 @@ export async function run(m, deps) {
       return say(m.reply);
     }
     case 'timer': case 'reminder': {
-      const c = await addCommitment(m.args.text, m.kind === 'timer' ? Date.now() + m.args.secs * 1000 : m.args.dueMs, 'reminder', m.args.repeat);
+      const c = await addCommitment(m.args.text, m.kind === 'timer' ? Date.now() + m.args.secs * 1000 : m.args.dueMs, m.kind, m.args.repeat);
       deps.onReminder?.(c);
       return say(m.reply);
     }
