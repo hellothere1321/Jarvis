@@ -19,6 +19,8 @@ static DICTATION_ENABLED: AtomicBool = AtomicBool::new(true);
 static VOICE_ENABLED: AtomicBool = AtomicBool::new(false);
 #[cfg(windows)]
 static MEETING_ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static MEETING_REQUEST: Mutex<Option<Value>> = Mutex::new(None);
 
 #[cfg(windows)]
 pub(crate) fn set_dictation(app: &AppHandle, enabled: bool) {
@@ -106,55 +108,60 @@ pub(crate) fn start_voice(app: &AppHandle) {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
             let app2 = app.clone();
-            let _ = app.run_on_main_thread(move || handle_voice(&app2, msg));
-        }
-        // Exited: anything it was drawing is gone, so the page draws the sidekick again.
-        {
-            let app2 = app.clone();
-            let _ = app.run_on_main_thread(move || to_sidekick_buddy(&app2, &json!({ "state": "gone" })));
-        }
-        // If it is still the wanted helper, it died on its own: retry a few times.
-        let state = app.state::<Voice>();
-        let ours = {
-            let mut slot = state.0.lock().unwrap();
-            let ours = slot.as_ref().map(Child::id) == Some(pid);
-            if ours {
-                if let Some(mut c) = slot.take() {
-                    if let Ok(status) = c.wait() {
-                        let how = exit_info(status);
-                        eprintln!("voice helper exited: {how}");
-                        if let Ok(mut e) = VOICE_EXIT.lock() {
-                            let times = e.as_ref().map_or(0, |(_, n)| *n) + 1;
-                            *e = Some((how, times));
-                        }
-                    }
-                }
-            }
-            ours
-        };
-        #[cfg(windows)]
-        if ours {
-            let app2 = app.clone();
             let _ = app.run_on_main_thread(move || {
-                if app2.state::<Voice>().0.lock().unwrap().is_none() && MEETING_ACTIVE.swap(false, Ordering::Relaxed) {
-                    to_sidecar(&app2, &json!({ "type": "meeting", "state": "lost" }));
+                if app2.state::<Voice>().0.lock().unwrap().as_ref().map(Child::id) == Some(pid) {
+                    handle_voice(&app2, msg);
                 }
             });
+        }
+        // Process the exit after the helper's queued messages, with the same owner as start and stop.
+        let app2 = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let state = app2.state::<Voice>();
+            let mut slot = state.0.lock().unwrap();
+            if slot.as_ref().map(Child::id) != Some(pid) {
+                return;
+            }
+            let mut child = slot.take().unwrap();
+            drop(slot);
+            thread::spawn(move || {
+                if let Ok(status) = child.wait() {
+                    let how = exit_info(status);
+                    eprintln!("voice helper exited: {how}");
+                    if let Ok(mut e) = VOICE_EXIT.lock() {
+                        let times = e.as_ref().map_or(0, |(_, n)| *n) + 1;
+                        *e = Some((how, times));
+                    }
+                }
+            });
+            to_sidekick_buddy(&app2, &json!({ "state": "gone" }));
+            to_overlays(&app2, &json!({ "kind": "voice", "type": "state", "state": "idle" }));
+            to_sidecar(&app2, &json!({ "type": "voice_state", "state": "idle" }));
+            #[cfg(windows)]
+            if MEETING_ACTIVE.swap(false, Ordering::Relaxed) {
+                let id = MEETING_REQUEST.lock().unwrap().take();
+                to_sidecar(&app2, &json!({ "type": "meeting", "state": "lost", "id": id, "ok": false,
+                    "error": "The audio helper stopped. Check Meetings for any saved audio." }));
+            }
+            #[cfg(windows)]
             if !VOICE_ENABLED.load(Ordering::Relaxed) {
                 return;
             }
-        }
-        if ours && state.1.fetch_add(1, Ordering::Relaxed) < 3 {
-            thread::sleep(Duration::from_secs(1));
-            let app2 = app.clone();
-            let _ = app.run_on_main_thread(move || {
-                #[cfg(windows)]
-                if !VOICE_ENABLED.load(Ordering::Relaxed) {
-                    return;
-                }
-                start_voice(&app2)
-            });
-        }
+            if state.1.fetch_add(1, Ordering::Relaxed) < 3 {
+                let app = app2.clone();
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_secs(1));
+                    let app2 = app.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        #[cfg(windows)]
+                        if !VOICE_ENABLED.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        start_voice(&app2);
+                    });
+                });
+            }
+        });
     });
 }
 
@@ -165,6 +172,7 @@ pub(crate) fn stop_voice(app: &AppHandle) {
         let _ = c.kill();
         let _ = c.wait();
     }
+    to_sidekick_buddy(app, &json!({ "state": "gone" }));
     to_overlays(app, &json!({ "kind": "voice", "type": "state", "state": "idle" }));
 }
 
@@ -200,6 +208,9 @@ pub(crate) fn meeting_command(app: &AppHandle, msg: &Value) {
         _ => "meeting_status",
     };
     if send_voice(app, &json!({ "cmd": cmd, "id": id, "folder": msg.get("folder") })) {
+        if cmd != "meeting_status" {
+            *MEETING_REQUEST.lock().unwrap() = Some(id.clone());
+        }
         if cmd == "meeting_start" {
             MEETING_ACTIVE.store(true, Ordering::Relaxed);
         }
@@ -387,9 +398,20 @@ pub(crate) fn set_esc(app: &AppHandle, label: &str, on: bool) {
 fn handle_voice(app: &AppHandle, msg: Value) {
     #[cfg(windows)]
     if msg["type"] == "meeting" {
+        let mut msg = msg;
+        let terminal = matches!(msg["state"].as_str(), Some("stopped" | "failed"));
+        {
+            let mut pending = MEETING_REQUEST.lock().unwrap();
+            if terminal || pending.as_ref() == Some(&msg["id"]) {
+                let id = pending.take();
+                if msg["id"].is_null() {
+                    msg["id"] = json!(id);
+                }
+            }
+        }
         let state = msg["state"].as_str();
         to_sidecar(app, &msg);
-        if matches!(state, Some("stopped" | "failed")) {
+        if terminal {
             MEETING_ACTIVE.store(false, Ordering::Relaxed);
             if state == Some("stopped") {
                 if let Some(folder) = msg["folder"].as_str() {

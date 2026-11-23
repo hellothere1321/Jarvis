@@ -132,7 +132,18 @@ fn open_failed(e: cpal::Error) -> MicError {
 pub struct Source {
     #[cfg(any(windows, target_os = "linux"))]
     _stream: Option<cpal::Stream>,
+    #[cfg(windows)]
+    default_endpoint: Option<cpal::DeviceId>,
     stop: Arc<AtomicBool>,
+}
+
+#[cfg(windows)]
+impl Source {
+    pub fn default_changed(&self) -> bool {
+        self.default_endpoint.as_ref().is_some_and(|id| {
+            default_endpoint_id(&cpal::default_host(), false).as_ref() != Some(id)
+        })
+    }
 }
 
 impl Drop for Source {
@@ -178,6 +189,8 @@ pub fn play_file(path: &Path, mut sink: Sink) -> Result<Source, String> {
     Ok(Source {
         #[cfg(any(windows, target_os = "linux"))]
         _stream: None,
+        #[cfg(windows)]
+        default_endpoint: None,
         stop,
     })
 }
@@ -202,6 +215,25 @@ pub fn unique(names: impl IntoIterator<Item = String>) -> Vec<String> {
 fn name_of(d: &cpal::Device) -> Option<String> {
     use cpal::traits::DeviceTrait;
     d.description().ok().map(|x| x.name().to_owned())
+}
+
+/// Use the concrete WASAPI endpoint. CPAL's default-device proxy activates via
+/// ActivateAudioInterfaceAsync, which can fail with RPC_E_CHANGED_MODE even
+/// when microphone access is allowed. An explicit endpoint uses IMMDevice::Activate.
+#[cfg(windows)]
+pub fn default_endpoint_id(host: &cpal::Host, output: bool) -> Option<cpal::DeviceId> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let default = if output { host.default_output_device() } else { host.default_input_device() }?;
+    default.id().ok()
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn default_mic(host: &cpal::Host) -> Option<cpal::Device> {
+    use cpal::traits::HostTrait;
+    #[cfg(windows)]
+    return host.device_by_id(&default_endpoint_id(host, false)?);
+    #[cfg(target_os = "linux")]
+    return host.default_input_device();
 }
 
 /// {"type":"mics"}: every input by name, the default's, and the pick (the panel's mic picker).
@@ -241,7 +273,7 @@ pub fn devices() -> serde_json::Value {
         Ok(list) => json!(list.map(|d| about(&d)).collect::<Vec<_>>()),
         Err(e) => json!({ "error": e.to_string() }),
     };
-    json!({ "type": "devices", "host": host.id().name(), "default": host.default_input_device().map(|d| about(&d)), "inputs": inputs })
+    json!({ "type": "devices", "host": host.id().name(), "default": default_mic(&host).map(|d| about(&d)), "inputs": inputs })
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
@@ -285,7 +317,11 @@ pub fn open_mic(mut sink: Sink) -> Result<Source, MicError> {
     let host = cpal::default_host();
     let chosen = CHOSEN.lock().unwrap().clone();
     let picked = chosen.and_then(|want| host.input_devices().ok()?.find(|d| name_of(d).as_deref() == Some(want.as_str())));
-    let dev = picked.or_else(|| host.default_input_device()).ok_or_else(|| MicError::new("missing", "no default input device"))?;
+    #[cfg(windows)]
+    let follows_default = picked.is_none();
+    let dev = picked.or_else(|| default_mic(&host)).ok_or_else(|| MicError::new("missing", "no default input device"))?;
+    #[cfg(windows)]
+    let default_endpoint = if follows_default { dev.id().ok() } else { None };
     let supported = dev.default_input_config().map_err(open_failed)?;
     sink.start(supported.sample_rate(), supported.channels() as usize);
     let err_tx = sink.tx.clone();
@@ -309,7 +345,12 @@ pub fn open_mic(mut sink: Sink) -> Result<Source, MicError> {
     .map_err(open_failed)?;
     stream.play().map_err(open_failed)?;
     log("microphone on");
-    Ok(Source { _stream: Some(stream), stop: Arc::new(AtomicBool::new(false)) })
+    Ok(Source {
+        _stream: Some(stream),
+        #[cfg(windows)]
+        default_endpoint,
+        stop: Arc::new(AtomicBool::new(false)),
+    })
 }
 
 /// RPC_E_CHANGED_MODE: after hours of use the helper's main thread can stop opening the mic with "Cannot change

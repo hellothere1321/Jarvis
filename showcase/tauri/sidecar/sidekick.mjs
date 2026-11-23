@@ -2628,7 +2628,13 @@ function onVoice(m) {
     onSpoken(m.text.trim(), m.area);
   }
   else if (m.type === 'voice_state' && m.state === 'idle' && snap?.waitingVoice) snap.waitingVoice = false;
-  else if (m.type === 'voice_ready') micPick();
+  else if (m.type === 'voice_ready') {
+    micPick();
+    if (WIN && config.voice && voiceReady()) {
+      send({ type: 'wake_hold', on: wakeHeld });
+      voiceConfig();
+    }
+  }
   else if (m.type === 'voice_mics') { mics = cleanMics(m); panel(); }
   else if (m.type === 'voice_lang') { langInfo = { id: String(m.id ?? ''), engine: String(m.engine ?? ''), online: !!m.online }; logLine('speech_lang', langInfo); panel(); }
   else if (m.type === 'voice_error') {

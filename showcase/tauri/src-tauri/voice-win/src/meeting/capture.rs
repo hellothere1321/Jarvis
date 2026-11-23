@@ -1,7 +1,10 @@
 // WASAPI input and render loopback, streamed to WAV on a shared recording clock.
 
 use super::TRACKS;
-use crate::{audio::Resampler, emit, RATE};
+use crate::{
+    audio::{default_endpoint_id, mic_problem, Resampler},
+    emit, keys, log, RATE,
+};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, DeviceId, FromSample, SampleFormat, SizedSample, Stream};
 use hound::{SampleFormat::Int, WavSpec, WavWriter};
@@ -146,7 +149,6 @@ where
     let mut resampler = Resampler::new(config.sample_rate);
     let mut mono = Vec::new();
     let mut expected = None;
-    let dropped = failed.clone();
     device.build_input_stream::<T, _, _>(
         config,
         move |data, info| {
@@ -168,11 +170,13 @@ where
             resampler.push(&mono, &mut samples);
             expected = Some(start + samples.len());
             // A stalled disk can lose a packet, but it can't make the audio callback wait or grow an unbounded queue.
-            if tx.try_send(Packet { start, samples }).is_err() {
-                dropped.store(true, Ordering::Relaxed);
+            let _ = tx.try_send(Packet { start, samples });
+        },
+        move |error| {
+            if mic_problem(&error, false).is_some() {
+                failed.store(true, Ordering::Relaxed);
             }
         },
-        move |_| failed.store(true, Ordering::Relaxed),
         None,
     )
 }
@@ -184,17 +188,13 @@ struct Track {
 }
 
 impl Track {
-    fn device(&self, host: &cpal::Host) -> Option<Device> {
-        if self.loopback {
-            host.default_output_device()
-        } else {
-            host.default_input_device()
-        }
-    }
-
-    fn refresh(&mut self, host: &cpal::Host, clock: &Clock) -> Result<bool, hound::Error> {
-        let device = self.device(host);
-        let id = device.as_ref().and_then(|d| d.id().ok());
+    fn refresh(
+        &mut self,
+        host: &cpal::Host,
+        clock: &Clock,
+        was_offline: bool,
+    ) -> Result<bool, hound::Error> {
+        let id = default_endpoint_id(host, self.loopback);
         if self
             .input
             .as_ref()
@@ -202,12 +202,24 @@ impl Track {
         {
             return Ok(true);
         }
-        self.disconnect(frames(clock.get().expect("recording clock started").elapsed()))?;
-        self.input = device.and_then(|d| {
-            let input = Input::open(d, clock.clone(), self.loopback).ok()?;
-            input.stream.play().ok()?;
-            Some(input)
-        });
+        self.disconnect(frames(
+            clock.get().expect("recording clock started").elapsed(),
+        ))?;
+        self.input = match open_track(host, id, clock, self.loopback).and_then(|input| {
+            input
+                .stream
+                .play()
+                .map_err(|error| track_error(self.loopback, &error))?;
+            Ok(input)
+        }) {
+            Ok(input) => Some(input),
+            Err(error) => {
+                if !was_offline {
+                    log(&format!("meeting: {error}"));
+                }
+                None
+            }
+        };
         Ok(self.input.is_some())
     }
 
@@ -238,6 +250,34 @@ impl Track {
         self.wave.pad_to(end)?;
         self.wave.writer.finalize()
     }
+}
+
+fn track_error(loopback: bool, error: &cpal::Error) -> String {
+    if !loopback && mic_problem(error, true).is_some_and(|problem| problem.reason == "blocked") {
+        return "Windows is blocking the microphone. Allow desktop apps to access it in Settings > Privacy & security > Microphone.".into();
+    }
+    let name = if loopback {
+        "computer audio"
+    } else {
+        "microphone"
+    };
+    format!("Could not start {name}: {error}")
+}
+
+fn open_track(
+    host: &cpal::Host,
+    id: Option<DeviceId>,
+    clock: &Clock,
+    loopback: bool,
+) -> Result<Input, String> {
+    let device = id
+        .and_then(|id| host.device_by_id(&id))
+        .ok_or(if loopback {
+            "No default playback device. Connect one to record computer audio."
+        } else {
+            "No default microphone. Connect one to record a meeting."
+        })?;
+    Input::open(device, clock.clone(), loopback).map_err(|error| track_error(loopback, &error))
 }
 
 // A tool window stays visible when the tray or panel is hidden. It never takes keyboard focus.
@@ -377,6 +417,7 @@ fn reply(id: &Value, ok: bool, message: &str) {
 fn run(folder: &Path, start_id: Value, stop: Receiver<Value>) {
     let mut id = start_id;
     if let Err(error) = record(folder, &mut id, stop) {
+        log(&format!("meeting: {error}"));
         emit(
             json!({ "type": "meeting", "state": "failed", "id": id, "folder": folder, "ok": false, "error": error.to_string() }),
         );
@@ -388,29 +429,38 @@ fn record(
     id: &mut Value,
     stop: Receiver<Value>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let indicator = Indicator::show()?;
-    let mut tracks = Vec::new();
-    for (index, name) in TRACKS.iter().enumerate() {
-        tracks.push(Track {
-            wave: Wave::new(&folder.join(format!("{name}.wav")))?,
-            input: None,
-            loopback: index == 1,
-        });
+    if !keys::mic_allowed() {
+        return Err("Windows is blocking the microphone. Allow desktop apps to access it in Settings > Privacy & security > Microphone.".into());
     }
     let host = cpal::default_host();
     let shared_clock = Clock::default();
-    for track in &mut tracks {
-        let device = track.device(&host).ok_or(if track.loopback {
-            "No default playback device"
-        } else {
-            "No default microphone"
-        })?;
-        track.input = Some(Input::open(device, shared_clock.clone(), track.loopback)?);
+    let open = |loopback| {
+        open_track(
+            &host,
+            default_endpoint_id(&host, loopback),
+            &shared_clock,
+            loopback,
+        )
+    };
+    let inputs = [open(false)?, open(true)?];
+    let mut tracks = Vec::new();
+    for (index, (name, input)) in TRACKS.iter().zip(inputs).enumerate() {
+        tracks.push(Track {
+            wave: Wave::new(&folder.join(format!("{name}.wav")))?,
+            input: Some(input),
+            loopback: index == 1,
+        });
     }
+    let indicator = Indicator::show()?;
     // Open both endpoints before starting the shared clock and accepting samples.
     let clock = *shared_clock.get_or_init(Instant::now);
-    for input in tracks.iter().filter_map(|track| track.input.as_ref()) {
-        input.stream.play()?;
+    for track in &tracks {
+        if let Some(input) = &track.input {
+            input
+                .stream
+                .play()
+                .map_err(|error| track_error(track.loopback, &error))?;
+        }
     }
     emit(
         json!({ "type": "meeting", "state": "recording", "id": id, "folder": folder, "ok": true }),
@@ -437,7 +487,7 @@ fn record(
         }
         if last_refresh.elapsed() >= Duration::from_millis(500) {
             for (index, track) in tracks.iter_mut().enumerate() {
-                let offline = !track.refresh(&host, &shared_clock)?;
+                let offline = !track.refresh(&host, &shared_clock, missing[index])?;
                 if missing[index] != offline {
                     missing[index] = offline;
                     emit(

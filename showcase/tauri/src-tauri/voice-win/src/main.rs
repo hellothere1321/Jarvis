@@ -307,6 +307,8 @@ struct Voice {
     wake: wake::WakeWord,
     wake_cooldown_until: f64,
     wake_retry_at: f64,
+    #[cfg(windows)]
+    wake_check_device_at: f64,
     wake_started_at: f64,
     wake_drops: usize,
     // What's being said while listening for the phrase: where it starts in the buffer, when, whether it was read.
@@ -373,6 +375,8 @@ impl Voice {
             wake: wake::WakeWord::default(),
             wake_cooldown_until: 0.0,
             wake_retry_at: 0.0,
+            #[cfg(windows)]
+            wake_check_device_at: 0.0,
             wake_started_at: 0.0,
             wake_drops: 0,
             utter: None,
@@ -998,6 +1002,10 @@ impl Voice {
 
     fn start_wake(&mut self, now: f64) {
         self.wake_started_at = now;
+        #[cfg(windows)]
+        {
+            self.wake_check_device_at = now + 1.0;
+        }
         self.phase = Phase::Wake;
         self.take += 1;
         self.best.clear();
@@ -1043,6 +1051,14 @@ impl Voice {
     // Reads each thing said once, and keeps only the last moment of sound while nobody talks.
     fn tick_wake(&mut self, now: f64) {
         let quiet = now - self.voice_at >= WAKE_PAUSE;
+        #[cfg(windows)]
+        if now >= self.wake_check_device_at {
+            self.wake_check_device_at = now + 1.0;
+            if !keys::mic_allowed() || (quiet && !self.wake_reading && self.source.as_ref().is_some_and(Source::default_changed)) {
+                self.stop_wake();
+                return;
+            }
+        }
         if let Some(start) = self.utter {
             if !self.utter_read && !self.wake_reading && (quiet || now - self.utter_at >= WAKE_LONGEST) {
                 self.utter_read = true;
