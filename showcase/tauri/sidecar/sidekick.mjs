@@ -36,7 +36,8 @@ import { cleanWakeName, wakeName } from './wakename.mjs';
 import { KEY_NAME as SYNC_KEY, MIN_PASSPHRASE, checkFolder, folderReady, merge as syncMerge, newDevice, prepareFolder, readRemotes, suggestFolders, tooMuchGone, writeOwn } from './sync.mjs';
 import { EMOTES, EchoFilter, ReplyStream } from './reply.mjs';
 import { downloadModel, isReady, modelDir, sizeLabel, totalBytes } from './voicemodel.mjs';
-import { copyText, createTools, expand, fitImage, imageBlock, oneYesNoAtATime, winOpen } from './tools.mjs';
+import { copyText, createTools, expand, fitImage, imageBlock, launch, oneYesNoAtATime, winOpen } from './tools.mjs';
+import { quick } from './quick.mjs';
 import { describeMarks } from './marks.mjs';
 import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
@@ -643,6 +644,7 @@ const userName = (() => {
 // ---------- tools ----------
 // The open request's voice, if replies are spoken: draw's beat lines are said on it, in order with the reply.
 let turnVoice = null;
+const commitmentsChanged = (c) => { menu(); scheduleReminders(); showList({ flash: c?.id, seconds: 6 }); syncSoon(); };
 const { tools, hands, whereNow, frontNow: frontData, frontBounds, ink, nextTurn } = createTools({
   focus: HANDS_OK ? { start: (m, t) => startFocus(m, t), stop: () => stopFocus() } : null,
   firedReminders: () => firedReminders,
@@ -650,7 +652,7 @@ const { tools, hands, whereNow, frontNow: frontData, frontBounds, ink, nextTurn 
   speak: (line) => { if (!turnVoice) return false; turnVoice.say(line); return true; },
   onHandoff: (task) => { activity.handoff(task); panel(); },
   commitmentsText: () => [commitmentsText(), doneTodayText() && `Done today:\n${doneTodayText()}`].filter(Boolean).join('\n'),
-  onCommitments: (c) => { menu(); scheduleReminders(); showList({ flash: c?.id, seconds: 6 }); syncSoon(); },
+  onCommitments: commitmentsChanged,
   showList: () => showList({ seconds: 20 }),
   fmtWhen: (ms) => fmtWhen(ms),
   onPlan: (args) => trail.plan(args),
@@ -1443,6 +1445,8 @@ const snoozeListenOn = () => VOICE_OK && !!config.voice && !!config.snoozeListen
 async function prompt(text, image = null, note = '', byVoice = false, news = null, listenAfter = false) {
   // What they said, word for word, for the handoffs below (a heavy model, a background agent). System lines aren't theirs.
   turnWords = news || intro || String(text).startsWith('(') ? '' : String(text);
+  // The time, a sum, a timer, "open Spotify": answered on this PC with no model call (quick.mjs).
+  if (turnWords && !image && !intro && !onboarding && await answerHere(turnWords)) return;
   nextMessageLearn(turnWords);
   skillsUsed.clear();
   // Retrying after a usage limit: the unanswered message is dropped from the conversation, and the next model is told.
@@ -1798,6 +1802,36 @@ async function signOut(provider) {
   if (config.provider === provider || !signedIn.get(config.provider)) { config.provider = null; config.model = null; ensureModel(); saveConfig(); }
   agent = null; menu();
   say(`${label} is removed.`, 'happy'); panelNote(`${label} is removed.`);
+}
+
+// What quick.mjs opens, after its safety checks: links go to the browser, apps and folders to the OS. Says whether it
+// worked; an app the PC doesn't know (or any app by name on Linux) goes to the model's open tool instead.
+async function quickOpen(target, type) {
+  if (type === 'url') { openUrl(target); return true; }
+  const p = type === 'path' ? expand(target) : target;
+  let r;
+  if (process.platform === 'win32') r = await winOpen(p);
+  else if (process.platform === 'darwin') r = await launch('open', type === 'app' ? ['-a', p] : [p]);
+  else if (type === 'path') r = await launch('xdg-open', [p]);
+  else return false;
+  return !r.err;
+}
+// A request quick.mjs answers: said (and spoken when replies are), and kept in the chat so the model sees it next turn.
+async function answerHere(text) {
+  let line = '';
+  const done = await quick(text, {
+    say: (l) => { line = l; speakLine(l); },
+    showList: () => showList({ seconds: 20 }), onReminder: commitmentsChanged, open: quickOpen, stat: (p) => fs.stat(p),
+  });
+  if (!done) return false;
+  await resumed;
+  if (!session) { session = newSession(config.provider, config.model); liveBlocks.clear(); pruneSessions(); }
+  session.messages.push({ role: 'user', content: text }, { role: 'assistant', content: [{ type: 'text', text: line }] });
+  session.lastActiveAt = Date.now();
+  agent = null; // rebuilt from the saved chat next turn, with this exchange in it
+  if (pendingFold?.session === session) applyPendingFold(); else saveSession(session);
+  menu();
+  return true;
 }
 
 function openUrl(url) {
