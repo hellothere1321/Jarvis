@@ -17,6 +17,8 @@
 // roamies-voice --perms                                   prints {"type":"perms","mic":…}
 // roamies-voice --devices                                 prints {"type":"devices",…}: every mic, the default, formats
 // roamies-voice --model <dir> --transcribe <wav>          dev: transcribe a file and exit
+// roamies-voice --model <dir> --transcribe-meeting <dir>   read the meeting WAVs and write transcript.json
+// Windows meeting commands on stdin: meeting_start (folder), meeting_stop, meeting_status. Replies carry the id.
 // roamies-voice --model <dir> --test-audio <wav>          dev: a file stands in for the mic ({"cmd":"listen"} starts)
 // roamies-voice --model <dir> --test-audio <wav> --wake   dev: the same with the wake word on, so "Hey Roamies" starts
 //                                                         a take (tests/wake_e2e.rs runs it on a spoken recording)
@@ -26,6 +28,7 @@ mod audio;
 mod dictation;
 mod ink;
 mod keys;
+mod meeting;
 mod onnx;
 mod wake;
 
@@ -97,6 +100,10 @@ fn model_present(dir: &Path) -> bool {
 fn load_model(dir: &Path) -> Result<ParakeetTDT, String> {
     // Half the cores: quick enough to read a minute of speech in a second or two, without starving the PC.
     let threads = thread::available_parallelism().map(|n| n.get() / 2).unwrap_or(2).clamp(1, 8);
+    load_model_with_threads(dir, threads)
+}
+
+fn load_model_with_threads(dir: &Path, threads: usize) -> Result<ParakeetTDT, String> {
     let t0 = Instant::now();
     let env = onnx::environment()?;
     let config = ExecutionConfig::new().with_environment(env).with_intra_threads(threads);
@@ -1099,6 +1106,30 @@ fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
 
+#[cfg(windows)]
+fn handle_event(voice: &mut Voice, recorder: &mut meeting::capture::Recorder, input: &mut bool, ev: Ev) -> bool {
+    if let Ev::Cmd(cmd) = &ev {
+        if recorder.command(cmd) {
+            return false;
+        }
+        match cmd["cmd"].as_str() {
+            Some("voice_input") => {
+                let enabled = cmd["on"] == true;
+                if *input && !enabled {
+                    voice.set_dictation(false);
+                    voice.set_wake(false);
+                    voice.cancel();
+                }
+                *input = enabled;
+                return false;
+            }
+            Some("listen" | "toggle" | "wake" | "dictate") if !*input => return false,
+            _ => {}
+        }
+    }
+    voice.handle(ev)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--perms") {
@@ -1123,6 +1154,15 @@ fn main() {
         return;
     }
     let model = arg(&args, "--model").map(PathBuf::from);
+    if let Some(folder) = arg(&args, "--transcribe-meeting") {
+        let result = model.as_deref().ok_or_else(|| "--transcribe-meeting needs --model <dir>".into())
+            .and_then(|model| meeting::transcribe(model, Path::new(&folder)));
+        if let Err(error) = result {
+            log(&format!("meeting transcription failed: {error}"));
+            std::process::exit(1);
+        }
+        return;
+    }
     // Cursor positions and captures in real pixels on every monitor (ink.rs turns them into screen points).
     #[cfg(windows)]
     // SAFETY: a plain call at startup, before any window or thread exists.
@@ -1174,12 +1214,20 @@ fn main() {
     });
 
     emit(json!({ "type": "ready", "engine": "parakeet", "model": voice.engine.is_some() }));
+    #[cfg(windows)]
+    let mut recorder = meeting::capture::Recorder::default();
+    #[cfg(windows)]
+    let mut input = !args.iter().any(|a| a == "--meeting-only");
     loop {
         let quit = match rx.recv_timeout(Duration::from_millis(16)) {
             Ok(ev) => {
-                let mut quit = voice.handle(ev);
+                #[cfg(windows)]
+                let mut handle = |ev| handle_event(&mut voice, &mut recorder, &mut input, ev);
+                #[cfg(not(windows))]
+                let mut handle = |ev| voice.handle(ev);
+                let mut quit = handle(ev);
                 while let Ok(ev) = rx.try_recv() {
-                    quit |= voice.handle(ev);
+                    quit |= handle(ev);
                 }
                 quit
             }
@@ -1189,8 +1237,14 @@ fn main() {
         if quit {
             break;
         }
+        #[cfg(windows)]
+        if !input {
+            continue;
+        }
         voice.tick();
     }
+    #[cfg(windows)]
+    drop(recorder);
     // Let the engine thread finish (a model still loading included) before exiting: tearing ONNX Runtime
     // down under it crashes.
     drop(voice);

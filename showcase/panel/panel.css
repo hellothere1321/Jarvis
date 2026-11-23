@@ -132,6 +132,10 @@ html, body { height: 100%; background: transparent; }
 /* Needs you (an update, no account): one small LED at the end, nothing more. */
 .navi .dot { display: none; width: 6px; height: 6px; margin-inline-start: auto; background: var(--accent); }
 .navi.flag .dot { display: block; }
+#nav-meetings.flag .dot, .led.recording { background: #ff7d87; }
+.meeting-transcript .meeting-segment { display: grid; gap: 4px; }
+.meeting-segment b { color: var(--ink-2); }
+.meeting-segment p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .navi.ping { animation: navi-ping 240ms steps(3, end); }
 @keyframes navi-ping { 0% { filter: brightness(1.9); } 100% { filter: none; } }
 

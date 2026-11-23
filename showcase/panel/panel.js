@@ -80,7 +80,11 @@
     const b = el('button', { className: 'link danger arm', type: 'button', 'data-k': k, 'aria-pressed': String(on), 'aria-label': on ? `Confirm: ${aria}` : aria },
       el('span', { className: 'no', textContent: label, 'aria-hidden': 'true' }), el('span', { className: 'yes', textContent: yes, 'aria-hidden': 'true' }));
     b.addEventListener('click', () => {
-      if (ui.arm === k) { disarm(); b.setAttribute('aria-pressed', 'false'); return leave(b, id); }
+      if (ui.arm === k) {
+        disarm(); b.setAttribute('aria-pressed', 'false');
+        if (typeof id === 'function') return id();
+        return leave(b, id);
+      }
       clearTimeout(armTimer); ui.arm = k; render(k);
       armTimer = setTimeout(() => { if (ui.arm === k) { ui.arm = null; render(); } }, 4000);
     });
@@ -211,15 +215,18 @@
   // ---------------------------------------------------------------- header
   function head() {
     const s = state.status;
-    $('led').className = `led${s.state === 'ready' ? ' on' : s.state === 'busy' ? ' busy' : ''}`;
+    const recording = state.meetingRecording;
+    $('led').className = `led${recording ? ' recording' : s.state === 'ready' ? ' on' : s.state === 'busy' ? ' busy' : ''}`;
     const now = $('now');
-    now.replaceChildren(el('b', { textContent: s.text }), state.hybrid?.active ? ` · ${modelName(state.hybrid.active)} (for this job)` : state.model ? ` · ${state.model.name}` : s.state === 'off' ? ' · Sign in on the Model page' : '');
+    now.replaceChildren(el('b', { textContent: recording ? 'Recording meeting' : s.text }), state.hybrid?.active ? ` · ${modelName(state.hybrid.active)} (for this job)` : state.model ? ` · ${state.model.name}` : s.state === 'off' ? ' · Sign in on the Model page' : '');
     now.title = now.textContent;
     $('ver').textContent = `v${state.version}`;
     updateButton();
     react();
     // The sidebar marks a page that needs you: no account to answer with.
     mark('model', s.state === 'off' ? 'not signed in' : null);
+    $('nav-meetings').parentElement.hidden = state.os !== 'win';
+    mark('meetings', recording ? 'recording' : null);
   }
   // One button for updates, updated in place (not rebuilt) so it keeps focus: Check for updates, then Update to x
   // (it downloads, installs and restarts), then Done. "Up to date" shows for a few seconds after a check.
@@ -1092,8 +1099,59 @@
     ];
   }
 
+  // ---------------------------------------------------------------- meetings
+  const meetingRequest = (action, id, confirmed) => send({ type: 'meeting_panel', action, id, confirmed });
+  let meetingData = null, meetingTranscript = null, meetingWanted = null;
+  const meetingTrack = (track) => track === 'mic' ? 'Microphone' : 'Computer audio';
+  const meetingTime = (seconds) => {
+    const s = Math.floor(seconds), two = (n) => String(n).padStart(2, '0');
+    return s >= 3600 ? `${Math.floor(s / 3600)}:${two(Math.floor(s / 60) % 60)}:${two(s % 60)}` : `${Math.floor(s / 60)}:${two(s % 60)}`;
+  };
+  function readMeeting(id) {
+    meetingWanted = id;
+    meetingRequest('read', id);
+  }
+  function meetingsPage() {
+    const data = meetingData;
+    if (meetingTranscript) {
+      const { id, segments } = meetingTranscript;
+      return [
+        group('Transcript', id, null, link('Back to meetings', () => { meetingTranscript = meetingWanted = null; render('meeting-read-' + id); }, { k: 'meetings-back' })),
+        segments.length ? el('ol', { className: 'list meeting-transcript' }, segments.map((s) =>
+          el('li', { className: 'item meeting-segment' },
+            el('b', { textContent: `${meetingTime(s.start)}–${meetingTime(s.end)} · ${meetingTrack(s.track)}` }),
+            el('p', { textContent: s.text })))) : el('p', { className: 'empty', textContent: 'No speech found.' }),
+      ];
+    }
+    const download = state.meetingDownload;
+    const active = data?.active || state.meetingRecording;
+    const control = active || !download
+      ? btn(active ? 'Stop recording' : 'Start recording', () => meetingRequest(active ? 'stop' : 'start'), { k: 'meeting-record', kind: 'primary', disabled: !data || data.switching })
+      : btn(download.status === 'downloading' ? `Downloading… ${download.pct}%` : `Download speech model (${download.size})`, () => act('voicedl'), { k: 'meeting-model', disabled: download.status === 'downloading' });
+    const text = active ? 'Recording microphone and computer audio.' : download ? 'Parakeet transcribes the recording on this PC.' : 'Record the default microphone and computer audio.';
+    const offline = data?.offline.length && `${data.offline.map(meetingTrack).join(' and ')} unavailable. Waiting for the device to reconnect.`;
+    const statuses = { recording: 'Recording', transcribing: 'Transcribing', ready: 'Transcript ready', failed: 'Transcription failed', audio_saved: 'Audio saved' };
+    return [
+      group('Meetings', text, null, control, offline ? el('p', { className: 'why', role: 'status', textContent: offline }) : null),
+      data?.rows.length ? el('ul', { className: 'list' }, data.rows.map((m) => {
+        const date = new Date(m.date).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+        const progress = m.pct != null && m.status === 'transcribing' ? ` ${m.pct}%` : '';
+        return el('li', { className: 'item mem' },
+          el('span', {}, date, el('small', { textContent: `${meetingTime(m.duration)} · ${statuses[m.status]}${progress}` })),
+          el('span', { className: 'row-btns' },
+            m.status === 'ready' && link('Transcript', () => readMeeting(m.id), { k: 'meeting-read-' + m.id }),
+            !['recording', 'transcribing'].includes(m.status) && armed('Delete', 'Confirm delete', 'meeting-delete-' + m.id,
+              () => meetingRequest('delete', m.id, true), `Delete meeting from ${date}`)));
+      })) : el('p', { className: 'empty', textContent: data ? 'No meetings recorded.' : 'Loading meetings…' }),
+    ];
+  }
+  $('nav-memory').parentElement.after(el('li', { hidden: true },
+    el('button', { className: 'px navi', type: 'button', id: 'nav-meetings', 'data-page': 'meetings', 'aria-controls': 'pane-meetings' },
+      'Meetings', el('span', { className: 'dot', 'aria-hidden': 'true' }))));
+  $('pane-memory').after(el('section', { className: 'pane', id: 'pane-meetings', 'aria-labelledby': 'nav-meetings', hidden: true }));
+
   // ---------------------------------------------------------------- render
-  const PANES = { home, memory, abilities: abilitiesPage, model: modelPage, appearance: appearancePage, speaking: speakingPage, listening: listeningPage, shortcuts: shortcutsPage, general: generalPage, about: aboutPage, whatsnew: whatsNewPage };
+  const PANES = { home, memory, meetings: meetingsPage, abilities: abilitiesPage, model: modelPage, appearance: appearancePage, speaking: speakingPage, listening: listeningPage, shortcuts: shortcutsPage, general: generalPage, about: aboutPage, whatsnew: whatsNewPage };
   // focusKey: what to focus after (a data-k, or an element id); otherwise whatever had focus keeps it.
   function render(focusKey, animate = false) {
     if (!state) return;
@@ -1148,6 +1206,7 @@
   function show(name, focus = false) {
     // Pages that became Abilities tabs (and Memory's old Skills tab) open that tab.
     if (ABILITY_TABS.some(([id]) => id === name)) { ui.tabs.abilities = name; name = 'abilities'; }
+    if (name === 'meetings' && state?.os !== 'win') return;
     if (!Object.hasOwn(PANES, name)) name = name === 'settings' ? 'model' : 'home';
     const changed = name !== tab;
     if (!changed && !focus) return;
@@ -1160,6 +1219,7 @@
     $('pane-' + name).closest('.body').scrollTop = 0;
     render(null, changed);
     const t = navi(name);
+    if (name === 'meetings') meetingRequest('list');
     if (changed) { t.classList.remove('ping'); void t.offsetWidth; t.classList.add('ping'); }
     if (focus) t.focus();
   }
@@ -1167,11 +1227,12 @@
   for (const t of TABS) navi(t).addEventListener('click', () => show(t));
   // Up and down walk the sidebar (Home and End jump to its ends); Tab goes on into the page.
   document.querySelector('.side').addEventListener('keydown', (e) => {
-    const i = TABS.indexOf(e.target.dataset?.page);
+    const tabs = TABS.filter((t) => t !== 'meetings' || state?.os === 'win');
+    const i = tabs.indexOf(e.target.dataset?.page);
     if (i < 0) return;
-    const n = TABS.length;
+    const n = tabs.length;
     const j = e.key === 'ArrowDown' ? (i + 1) % n : e.key === 'ArrowUp' ? (i + n - 1) % n : e.key === 'Home' ? 0 : e.key === 'End' ? n - 1 : -1;
-    if (j >= 0) { e.preventDefault(); show(TABS[j], true); }
+    if (j >= 0) { e.preventDefault(); show(tabs[j], true); }
   });
   // Changing a shortcut on the Shortcuts page: the next key with Control, Option (Alt) or Command (Win) is the new one.
   const KEY_CODE = /^(Key[A-Z]|Digit\d|F\d{1,2}|Space|Backquote|Minus|Equal|BracketLeft|BracketRight|Backslash|Semicolon|Quote|Comma|Period|Slash)$/;
@@ -1251,6 +1312,16 @@
       if (ui.arm && !document.querySelector(`[data-k="${CSS.escape(ui.arm)}"]`)) ui.arm = null;
       render(null, first);
       if (m.state.tab) show(m.state.tab, true); // opened for a reason (asked with nothing signed in: the Model page)
+      if (m.state.meeting) readMeeting(m.state.meeting);
+    }
+    else if (m.kind === 'meetings') {
+      meetingData = m;
+      if (tab === 'meetings' && !meetingTranscript) render();
+    }
+    else if (m.kind === 'meeting_transcript' && m.id === meetingWanted && tab === 'meetings') {
+      meetingTranscript = m;
+      render('meetings-back');
+      $('pane-meetings').scrollTop = 0;
     }
     else if (m.kind === 'note') note(m.text, m.bad, m.copy);
     else if (m.kind === 'copied' && m.which === 'problem') note(m.ok ? 'Copied the error details. Paste them into your report.' : "Couldn't copy the error details. Try Save diagnostics.", !m.ok);

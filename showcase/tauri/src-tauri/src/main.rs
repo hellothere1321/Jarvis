@@ -1873,11 +1873,18 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
         // The panel's mic picker: ask for the list, and pass on the pick (an id from it, or "" for automatic).
         Some("voice_mics") => to_voice(app, &json!({ "cmd": "mics" })),
         Some("voice_mic") => to_voice(app, &json!({ "cmd": "mic", "id": msg.get("id").and_then(Value::as_str).unwrap_or("") })),
+        #[cfg(windows)]
+        Some("meeting_start" | "meeting_stop" | "meeting_status") => voice::meeting_command(app, &msg),
         Some("voice_config") => {
             if let Some(dir) = msg.get("model").and_then(Value::as_str) {
                 *app.state::<VoiceModel>().0.lock().unwrap() = Some(dir.to_owned());
             }
-            if msg.get("enabled").and_then(Value::as_bool) == Some(true) {
+            let enabled = msg["enabled"] == true;
+            #[cfg(windows)]
+            let keep_for_meeting = voice::set_voice_enabled(app, enabled);
+            #[cfg(not(windows))]
+            let keep_for_meeting = false;
+            if enabled {
                 app.state::<Voice>().1.store(0, Ordering::Relaxed);
                 start_voice(app);
                 let mute = msg.get("mute").and_then(Value::as_bool).unwrap_or(true);
@@ -1891,7 +1898,7 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
                 // The language takes are recognised in ("auto": the Mac's own language list). macOS helper only.
                 let lang = msg.get("lang").and_then(Value::as_str).unwrap_or("auto");
                 to_voice(app, &json!({ "cmd": "lang", "id": lang }));
-            } else {
+            } else if !keep_for_meeting {
                 stop_voice(app);
             }
         }

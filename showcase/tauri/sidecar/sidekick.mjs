@@ -38,8 +38,9 @@ import { cleanWakeName, wakeName } from './wakename.mjs';
 import { KEY_NAME as SYNC_KEY, MIN_PASSPHRASE, checkFolder, folderReady, merge as syncMerge, newDevice, prepareFolder, readRemotes, suggestFolders, tooMuchGone, writeOwn } from './sync.mjs';
 import { EMOTES, EchoFilter, ReplyStream } from './reply.mjs';
 import { downloadModel, isReady, modelDir, sizeLabel, totalBytes } from './voicemodel.mjs';
-import { copyText, createTools, expand, fitImage, imageBlock, launch, oneYesNoAtATime, PLANNER_TOOLS, winOpen } from './tools.mjs';
+import { copyText, createTools, expand, fitImage, imageBlock, launch, meetingTools, oneYesNoAtATime, PLANNER_TOOLS, winOpen } from './tools.mjs';
 import { quick } from './quick.mjs';
+import { createMeetings } from './meetings.mjs';
 import { describeMarks } from './marks.mjs';
 import { faviconFor } from './draw.mjs';
 import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
@@ -651,6 +652,22 @@ const userName = (() => {
 })();
 
 // ---------- tools ----------
+const meetings = process.platform === 'win32' ? createMeetings({
+  call: (msg) => shellCall(msg, 20_000),
+  changed: () => meetingsChanged(),
+  notify: (text, bad) => { say(text, bad ? 'concerned' : 'happy'); panelNote(text, bad); },
+}) : null;
+async function startMeeting() {
+  if (!voiceReady()) throw new Error('Download the speech model on the Meetings page before recording.');
+  return meetings.start();
+}
+async function openMeeting(id) {
+  await meetings.read(id);
+  panelMeeting = id;
+  openPanel('meetings');
+}
+const localMeetingTools = meetings ? meetingTools({ ...meetings, start: startMeeting, open: openMeeting }) : [];
+const meetingToolNames = new Set(localMeetingTools.map((t) => t.name));
 // The open request's voice, if replies are spoken: draw's beat lines are said on it, in order with the reply.
 let turnVoice = null;
 const commitmentsChanged = (c) => { menu(); scheduleReminders(); showList({ flash: c?.id, seconds: 6 }); syncSoon(); };
@@ -701,7 +718,7 @@ const agents = createAgents({
     reveal: async (p) => reveal(p),
   },
 });
-tools.push(...agents.tools);
+tools.push(...agents.tools, ...localMeetingTools);
 // Connections (mcp.mjs): apps and services through their MCP servers, added only by asking the Roamie. Connected the
 // first time one is needed (or a moment after launch, when some are saved).
 const mcp = createMcp({ secrets, log: (kind, data) => logLine(kind, data) });
@@ -984,7 +1001,7 @@ function makeAgent(cc) {
     model: config.model,
     system: system(),
     priorMessages: prior,
-    tools: config.lite ? tools.filter((t) => LITE_TOOLS.has(t.name) || PLANNER_TOOLS.has(t.name)) : tools,
+    tools: config.lite ? tools.filter((t) => LITE_TOOLS.has(t.name) || PLANNER_TOOLS.has(t.name) || meetingToolNames.has(t.name)) : tools,
     maxTurns: config.lite ? LITE_TURNS : 24,
     transformContext: (msgs, o) => {
       const fitted = fitContext(msgs, { budgetTokens: requestBudget(), force: o?.force });
@@ -2310,12 +2327,42 @@ let panelOpen = false, panelQueued = false, panelAt = 0;
 function panel() {
   if (!panelOpen || panelQueued) return;
   panelQueued = true;
-  setImmediate(() => { panelQueued = false; if (panelOpen) { send({ type: 'panel', msg: { kind: 'state', state: { ...panelState(), tab: panelTab } } }); panelTab = null; } });
+  setImmediate(() => { panelQueued = false; if (panelOpen) { send({ type: 'panel', msg: { kind: 'state', state: { ...panelState(), tab: panelTab, meeting: panelMeeting } } }); panelTab = panelMeeting = null; } });
 }
 // Opens the panel on a page (the one-time tab rides on its next state).
-let panelTab = null;
+let panelTab = null, panelMeeting = null;
 function openPanel(tab) { panelTab = tab; send({ type: 'panel_show' }); if (panelOpen) panel(); }
 const panelNote = (text, bad = false, p = null) => panelOpen && send({ type: 'panel', msg: { kind: 'note', text, bad, ...(p ? linked(p) : {}) } });
+let meetingsTimer;
+function meetingsChanged() {
+  if (!panelOpen || meetingsTimer) return;
+  meetingsTimer = setTimeout(async () => {
+    meetingsTimer = null;
+    try {
+      const rows = (await meetings.list()).map(({ folder, ...row }) => row);
+      if (panelOpen) send({ type: 'panel', msg: { kind: 'meetings', ...meetings.state(), rows } });
+    } catch {
+      panelNote('Could not list the meeting recordings.', true);
+    }
+  }, 100);
+}
+async function meetingPanel(m) {
+  if (!meetings) return;
+  try {
+    if (m.action === 'list') meetingsChanged();
+    if (m.action === 'start') await startMeeting();
+    if (m.action === 'stop') await meetings.stop();
+    if (m.action === 'read') {
+      const transcript = await meetings.read(m.id);
+      send({ type: 'panel', msg: { kind: 'meeting_transcript', ...transcript } });
+    }
+    if (m.action === 'delete' && m.confirmed === true) {
+      await meetings.remove(m.id, { confirm: () => true });
+    }
+  } catch (e) {
+    panelNote(e.message, true);
+  }
+}
 function panelState() {
   // The Model page's model is the user's default, never the one a heavy job is borrowing (that's hybrid.active).
   const mine = userDefault(config, routed, defaultPick), current = getModel(mine.model);
@@ -2326,6 +2373,8 @@ function panelState() {
     wayland: WAYLAND, bind: HOTKEYS_OK ? null : BIND,
     status: busy ? { state: 'busy', text: doing ?? 'Thinking' } : loggingIn ? { state: 'busy', text: loginStatus || `Signing in to ${PROVIDER_LABELS[loggingIn]}` } : current ? { state: 'ready', text: 'Ready' } : { state: 'off', text: 'Not signed in' },
     busy, canNew: !busy && !!session?.messages.length,
+    meetingRecording: !!meetings?.state().active,
+    meetingDownload: meetings && !voiceReady() ? speechModelDownload() : null,
     // The type-to-ask shortcut, for the Ask button's tooltip (none on Wayland).
     askKeys: HOTKEYS_OK ? writeSymbols() || null : null,
     // The Shortcuts page: the talk pairs, and the other shortcuts as people on this computer say them.
@@ -2379,7 +2428,7 @@ function panelState() {
       on: !!config.voice, lang: speechLangId(), langOnline: langInfo && langInfo.id === speechLangId() ? langInfo.online : null, studioSpeak: config.studioSpeak === 'full' || config.studioSpeak === 'medium' ? config.studioSpeak : 'short', keys: HOTKEYS_OK ? talkSymbols() : null, ready: voiceReady(), mac: MAC, mute: config.muteWhileTalking !== false, autoListen: !!config.autoListen, listenEvery: !!config.listenEvery, listenSecs: listenSecs(), listenChoices: LISTEN_SECS, snoozeListen: !!config.snoozeListen, wake: WAKE_OK, wakeWord: !!config.wakeWord, wakeName: wakeName(config),
       // The mic picker: what the voice helper lists, the pick ('' is automatic) and the mic automatic uses now.
       mics: mics.list, mic: config.mic ?? '', micAuto: mics.list.find((x) => x.id === mics.auto)?.name ?? '',
-      download: NEEDS_MODEL && config.voice && !voiceReady() ? { status: voiceModel.status, pct: voiceModel.total ? Math.floor((voiceModel.done / voiceModel.total) * 100) : 0, size: sizeLabel() } : null,
+      download: NEEDS_MODEL && config.voice && !voiceReady() ? speechModelDownload() : null,
     } : null,
     sound: !!config.sound, volume: volumeNow(), actions: !!config.allowActions, skipAllow: !!config.skipAllow, lite: !!config.lite, hybrid: { on: !!config.hybrid, jobs: JOB_KINDS.map((j) => ({ ...j, value: parseSpec(config.heavy?.[j.kind])?.spec ?? '' })), active: routed?.spec ?? '' }, subagents: { on: !!config.subagents, delegate: DELEGATE_MODES.includes(config.delegate) ? config.delegate : 'ask', crew: SUBAGENTS.map((s) => { const c = activeCrew(config.crew, crewSpec, hybridActive() ? config.heavy : null).find((x) => x.id === s.id); return { id: s.id, label: s.label, hint: s.hint, value: parseSpec(config.crew?.[s.id])?.spec ?? '', via: c?.via ?? '', uses: c?.spec.spec ?? '' }; }) }, efforts: Object.fromEntries(SLOTS.map((k) => [k, config.efforts?.[k] ?? ''])), fallbacks: { on: !!config.backups, slots: [0, 1].map((i) => parseSpec(config.fallbacks?.[i])?.spec ?? ''), limited: limits.list().filter((l) => !l.key.includes(':') && (isQuota(l.kind) || l.kind === 'busy')).map((l) => ({ label: PROVIDER_LABELS[l.key] ?? l.key, until: l.until })), unavailable: limits.list().filter((l) => !(isQuota(l.kind) || l.kind === 'busy')).map((l) => ({ label: PROVIDER_LABELS[l.key] ?? modelName(l.key.split(':').slice(1).join(':')) ?? l.key, why: becauseOf(l.kind), until: l.until })), using: routed && /^backup/.test(routed.slot ?? '') ? routed.spec : '' }, notch: notchMode(), notchReal: notchScreen, brief: { on: !!config.morningBrief, todoist: !!config.briefTodoist, canTodoist: HANDS_OK }, focus: HANDS_OK ? { until: focusBlock?.until ?? null, task: focusBlock?.task ?? '', list: distractionList(), custom: !!config.distractions } : null, sync: { dir: config.syncDir || '', at: syncInfo.at, error: syncInfo.error, paused: !!syncInfo.paused }, gameMode: HANDS_OK ? config.gameSidebar !== false : null,
     login: login.supported ? { on: login.on } : null,
@@ -2402,6 +2451,10 @@ const voiceConfig = () => {
 };
 
 // Progress goes to the setup guide often and to the tray menu now and then.
+function speechModelDownload() {
+  const { status, done, total } = voiceModel;
+  return { status, pct: total ? Math.floor((done / total) * 100) : 0, size: sizeLabel() };
+}
 let modelShownAt = 0, modelMenuAt = 0;
 function modelUpdate(force) {
   const now = Date.now();
@@ -2958,7 +3011,13 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   let m;
   try { m = JSON.parse(line); } catch { return; }
   if (m.type === 'menu') onMenu(m.id, m.via).catch((e) => console.error('menu', e));
-  else if (m.type === 'panel_open') { panelOpen = true; panelAt = Date.now(); logLine('panel_open', {}); if (VOICE_OK) send({ type: 'voice_mics' }); Promise.all([refreshAuth(), signedIn.get('local') && syncLocal(), tts().local && speech.checkLocal()]).catch(() => {}).finally(() => { panel(); refreshCatalogs(); }); }
+  else if (m.type === 'panel_open') { panelOpen = true; panelAt = Date.now(); logLine('panel_open', {}); if (VOICE_OK) send({ type: 'voice_mics' }); if (meetings) meetingsChanged(); Promise.all([refreshAuth(), signedIn.get('local') && syncLocal(), tts().local && speech.checkLocal()]).catch(() => {}).finally(() => { panel(); refreshCatalogs(); }); }
+  else if (m.type === 'meeting_panel') meetingPanel(m);
+  else if (m.type === 'meeting' && meetings) {
+    meetings.handle(m);
+    shellAnswer(m);
+    if (['recording', 'stopped', 'failed', 'lost', 'status'].includes(m.state)) panel();
+  }
   else if (m.type === 'diagnostics') { shellInfo?.(m); shellInfo = null; }
   else if (m.type === 'panel_closed') { panelOpen = false; logLine('panel_closed', { why: String(m.why ?? ''), ms: Date.now() - panelAt }); }
   else if (m.type === 'panel_google_client' && typeof m.text === 'string') {
@@ -3198,6 +3257,7 @@ midnightClean();
 setTimeout(() => checkUpdates(), 20_000);
 setInterval(() => checkUpdates(), 6 * 3600_000);
 voiceConfig();
+if (meetings) send({ type: 'meeting_status' });
 // First run (or setup never finished): open the guide.
 // v2 added the "Control apps" (Accessibility) permission: people who finished setup before that
 // get the guide once more, on the permissions step.

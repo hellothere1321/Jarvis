@@ -15,12 +15,29 @@ static LIST_ID: AtomicU32 = AtomicU32::new(0);
 static ESC_ID: AtomicU32 = AtomicU32::new(0);
 #[cfg(windows)]
 static DICTATION_ENABLED: AtomicBool = AtomicBool::new(true);
+#[cfg(windows)]
+static VOICE_ENABLED: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static MEETING_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(windows)]
 pub(crate) fn set_dictation(app: &AppHandle, enabled: bool) {
     DICTATION_ENABLED.store(enabled, Ordering::Relaxed);
     let key = enabled.then_some("rshift");
     to_voice(app, &json!({ "cmd": "dictate", "key": key }));
+}
+
+#[cfg(windows)]
+pub(crate) fn set_voice_enabled(app: &AppHandle, enabled: bool) -> bool {
+    VOICE_ENABLED.store(enabled, Ordering::Relaxed);
+    if enabled {
+        start_voice(app);
+    }
+    let _ = to_voice(app, &json!({ "cmd": "voice_input", "on": enabled }));
+    if enabled {
+        set_dictation(app, DICTATION_ENABLED.load(Ordering::Relaxed));
+    }
+    MEETING_ACTIVE.load(Ordering::Relaxed)
 }
 
 thread_local! {
@@ -54,8 +71,12 @@ pub(crate) fn start_voice(app: &AppHandle) {
     let mut cmd = Command::new(bin);
     cmd.arg("--chord").arg(chord);
     #[cfg(windows)]
-    if DICTATION_ENABLED.load(Ordering::Relaxed) {
-        cmd.arg("--dictate").arg("rshift");
+    {
+        if !VOICE_ENABLED.load(Ordering::Relaxed) {
+            cmd.arg("--meeting-only");
+        } else if DICTATION_ENABLED.load(Ordering::Relaxed) {
+            cmd.arg("--dictate").arg("rshift");
+        }
     }
     if let Some(dir) = app.state::<VoiceModel>().0.lock().unwrap().clone() {
         cmd.arg("--model").arg(dir);
@@ -111,10 +132,28 @@ pub(crate) fn start_voice(app: &AppHandle) {
             }
             ours
         };
+        #[cfg(windows)]
+        if ours {
+            let app2 = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if app2.state::<Voice>().0.lock().unwrap().is_none() && MEETING_ACTIVE.swap(false, Ordering::Relaxed) {
+                    to_sidecar(&app2, &json!({ "type": "meeting", "state": "lost" }));
+                }
+            });
+            if !VOICE_ENABLED.load(Ordering::Relaxed) {
+                return;
+            }
+        }
         if ours && state.1.fetch_add(1, Ordering::Relaxed) < 3 {
             thread::sleep(Duration::from_secs(1));
             let app2 = app.clone();
-            let _ = app.run_on_main_thread(move || start_voice(&app2));
+            let _ = app.run_on_main_thread(move || {
+                #[cfg(windows)]
+                if !VOICE_ENABLED.load(Ordering::Relaxed) {
+                    return;
+                }
+                start_voice(&app2)
+            });
         }
     });
 }
@@ -130,11 +169,90 @@ pub(crate) fn stop_voice(app: &AppHandle) {
 }
 
 pub(crate) fn to_voice(app: &AppHandle, msg: &Value) {
+    let _ = send_voice(app, msg);
+}
+
+fn send_voice(app: &AppHandle, msg: &Value) -> bool {
     if let Some(child) = app.state::<Voice>().0.lock().unwrap().as_mut() {
         if let Some(stdin) = child.stdin.as_mut() {
-            let _ = writeln!(stdin, "{msg}");
+            return writeln!(stdin, "{msg}").is_ok();
         }
     }
+    false
+}
+
+#[cfg(windows)]
+pub(crate) fn meeting_command(app: &AppHandle, msg: &Value) {
+    let id = &msg["id"];
+    let fail = |error: &str| to_sidecar(app, &json!({ "type": "meeting", "state": "reply", "id": id, "ok": false, "error": error }));
+    let cmd = match msg["type"].as_str() {
+        Some("meeting_start") => {
+            if MEETING_ACTIVE.load(Ordering::Relaxed) {
+                return fail("A meeting is already recording");
+            }
+            if app.state::<VoiceModel>().0.lock().unwrap().is_none() {
+                return fail("Download the speech model before recording");
+            }
+            start_voice(app);
+            "meeting_start"
+        }
+        Some("meeting_stop") => "meeting_stop",
+        _ => "meeting_status",
+    };
+    if send_voice(app, &json!({ "cmd": cmd, "id": id, "folder": msg.get("folder") })) {
+        if cmd == "meeting_start" {
+            MEETING_ACTIVE.store(true, Ordering::Relaxed);
+        }
+    } else if cmd == "meeting_status" {
+        to_sidecar(app, &json!({ "type": "meeting", "state": "status", "id": id, "ok": true, "folder": null }));
+    } else {
+        fail("The Windows voice helper is unavailable");
+    }
+}
+
+#[cfg(windows)]
+fn transcribe_meeting(app: &AppHandle, folder: PathBuf) {
+    // One meeting model at a time. The talk and dictation model stays in the voice helper.
+    static WORKER: Mutex<()> = Mutex::new(());
+    let model = app.state::<VoiceModel>().0.lock().unwrap().clone();
+    let runtime = app.path().resource_dir().ok().map(|p| p.join("onnxruntime.dll"));
+    let pending = folder.join("transcription.pending");
+    let _ = std::fs::write(&pending, std::process::id().to_string());
+    let app = app.clone();
+    thread::spawn(move || {
+        let _worker = WORKER.lock().unwrap();
+        let send = |state, pct| to_sidecar(&app, &json!({ "type": "meeting", "state": state, "folder": &folder, "pct": pct }));
+        let run = || -> Option<bool> {
+            let mut cmd = Command::new(voice_binary()?);
+            cmd.arg("--model").arg(model?).arg("--transcribe-meeting").arg(&folder);
+            if let Some(runtime) = runtime {
+                cmd.arg("--ort").arg(runtime);
+            }
+            let mut child = hide_console(&mut cmd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+            let _ = std::fs::write(&pending, child.id().to_string());
+            if let Some(stdout) = child.stdout.take() {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
+                    if msg["type"] == "meeting_progress" {
+                        if let Some(pct) = msg["pct"].as_u64().filter(|pct| *pct <= 100) {
+                            send("progress", Some(pct));
+                        }
+                    }
+                }
+            }
+            Some(child.wait().ok()?.success())
+        };
+        let ok = run() == Some(true);
+        if !ok {
+            let _ = std::fs::write(folder.join("transcription.failed"), "");
+        }
+        let _ = std::fs::remove_file(pending);
+        if ok {
+            send("ready", None);
+        } else {
+            send("transcription_failed", None);
+        }
+    });
 }
 
 /// Tell the voice helper to drop a talk-chord press that turned out to be the show/hide shortcut.
@@ -267,6 +385,23 @@ pub(crate) fn set_esc(app: &AppHandle, label: &str, on: bool) {
 }
 
 fn handle_voice(app: &AppHandle, msg: Value) {
+    #[cfg(windows)]
+    if msg["type"] == "meeting" {
+        let state = msg["state"].as_str();
+        to_sidecar(app, &msg);
+        if matches!(state, Some("stopped" | "failed")) {
+            MEETING_ACTIVE.store(false, Ordering::Relaxed);
+            if state == Some("stopped") {
+                if let Some(folder) = msg["folder"].as_str() {
+                    transcribe_meeting(app, PathBuf::from(folder));
+                }
+            }
+            if !VOICE_ENABLED.load(Ordering::Relaxed) {
+                stop_voice(app);
+            }
+        }
+        return;
+    }
     // Dictation status belongs to the helper. The talk pill would close the panel or ask box.
     if msg.get("type").and_then(Value::as_str) == Some("dictate") {
         return;

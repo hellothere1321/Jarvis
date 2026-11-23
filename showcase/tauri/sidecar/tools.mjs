@@ -23,6 +23,35 @@ import { deleteSkill, fetchSkills, installSkill, listSkills, readSkill, readSkil
 const HOME = os.homedir();
 export const expand = (p) => path.resolve(String(p).replace(/^~(?=$|\/|\\)/, HOME));
 const clip = (s, n) => (s.length > n ? s.slice(0, n) + `\n…(${s.length - n} more characters)` : s);
+
+export function meetingTools(meetings) {
+  return [
+    {
+      name: 'start_meeting',
+      description: 'Start recording the default Windows microphone and computer sound when the user asks to record a meeting. A visible indicator stays up until it stops.',
+      parameters: z.object({}), executionMode: 'sequential',
+      execute: async () => `Recording meeting ${await meetings.start()}.`,
+    },
+    {
+      name: 'stop_meeting',
+      description: 'Stop the active meeting recording. The app transcribes the saved audio on this PC and tells the user when it is ready.',
+      parameters: z.object({}), executionMode: 'sequential',
+      execute: async () => `Stopped recording ${await meetings.stop()}. Transcription will run on this PC.`,
+    },
+    {
+      name: 'list_meetings',
+      description: 'List local meetings with their folder names, dates, durations in seconds and transcript status.',
+      parameters: z.object({}),
+      execute: async () => JSON.stringify((await meetings.list()).map(({ id, date, duration, status }) => ({ id, date, duration, status }))),
+    },
+    {
+      name: 'read_meeting',
+      description: 'Open a meeting transcript in the local Meetings page for the user to read. Use its folder name from list_meetings.',
+      parameters: z.object({ id: z.string().max(40) }),
+      execute: async ({ id }) => { await meetings.open(id); return `Opened the transcript for ${id} in Meetings.`; },
+    },
+  ];
+}
 // windowsHide: no console window flashing up for each command or screenshot on Windows.
 // shell: false always: arguments go to the program as they are, never through a shell.
 // onLine: called with each line of stderr as it arrives (the hands helper's live progress).
